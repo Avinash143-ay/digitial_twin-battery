@@ -14,6 +14,9 @@ ENV/
 *.pt
 *.ckpt
 
+# Large data files (>100MB GitHub limit)
+data/cell_log_age_2s_P065_1_S01_C03/
+
 # IDE
 .vscode/
 .idea/
