@@ -246,16 +246,6 @@ For a battery with 95% health:
 - Check for JavaScript errors
 - Clear browser cache and reload
 
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create feature branch
-3. Submit pull request with description
-
-## 📄 License
-
-MIT License - See LICENSE file for details
 
 ## 👨‍💻 Author
 
@@ -265,7 +255,6 @@ MIT License - See LICENSE file for details
 
 ## 🙏 Acknowledgments
 
-- Battery dataset from NASA Battery Dataset
 - PyTorch framework
 - Chart.js for visualization
 - Flask for backend API
