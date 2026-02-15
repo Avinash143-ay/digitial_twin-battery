@@ -297,6 +297,100 @@ const createChart = (ctx, labels, actual, predicted, title) =>
     },
   });
 
+// Create ensemble chart with uncertainty bands
+const createEnsembleChart = (ctx, labels, median, min, max, title) =>
+  new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: `${title} Uncertainty Range`,
+          data: max,
+          borderColor: "rgba(249, 115, 22, 0.3)",
+          backgroundColor: "rgba(249, 115, 22, 0.2)",
+          fill: "+1", // Fill to next dataset (creates band)
+          tension: 0.3,
+          pointRadius: 0,
+          borderWidth: 1,
+          borderDash: [5, 5],
+        },
+        {
+          label: `${title} Min`,
+          data: min,
+          borderColor: "rgba(249, 115, 22, 0.3)",
+          backgroundColor: "rgba(249, 115, 22, 0.2)",
+          fill: false,
+          tension: 0.3,
+          pointRadius: 0,
+          borderWidth: 1,
+          borderDash: [5, 5],
+        },
+        {
+          label: `${title} Median (Ensemble)`,
+          data: median,
+          borderColor: "#f97316",
+          backgroundColor: "rgba(249, 115, 22, 0.1)",
+          tension: 0.3,
+          pointRadius: median.length > 500 ? 0 : 3,
+          borderWidth: 3,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: {
+        duration: median.length > 1000 ? 0 : 750,
+      },
+      interaction: {
+        mode: "index",
+        intersect: false,
+      },
+      plugins: {
+        legend: {
+          position: "top",
+        },
+        tooltip: {
+          enabled: true,
+          callbacks: {
+            afterBody: function(context) {
+              if (context.length > 0) {
+                const idx = context[0].dataIndex;
+                return [
+                  `Uncertainty: ±${((max[idx] - min[idx]) / 2).toFixed(3)}`,
+                  `Range: ${min[idx].toFixed(3)} - ${max[idx].toFixed(3)}`
+                ];
+              }
+            }
+          }
+        },
+        decimation: {
+          enabled: true,
+          algorithm: "lttb",
+        },
+      },
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: "Time (seconds)",
+          },
+          ticks: {
+            maxTicksLimit: 10,
+          },
+        },
+        y: {
+          title: {
+            display: true,
+            text: title,
+          },
+        },
+      },
+    },
+  });
+
 const updateSummary = (element, actual, predicted) => {
   if (!actual.length || !predicted.length) {
     element.textContent = "No data available.";
@@ -588,6 +682,24 @@ const predictWithEnsemble = async () => {
     if (result.status === 'success') {
       const voltageForecast = result.voltage_forecast;
       const temperatureForecast = result.temperature_forecast;
+      const voltageEnsemble = result.voltage_ensemble; // 10 model predictions
+      const temperatureEnsemble = result.temperature_ensemble; // 10 model predictions
+
+      // Calculate min/max for uncertainty bands
+      const voltageMin = [];
+      const voltageMax = [];
+      const temperatureMin = [];
+      const temperatureMax = [];
+
+      for (let i = 0; i < steps; i++) {
+        const vValues = voltageEnsemble.map(model => model[i]);
+        const tValues = temperatureEnsemble.map(model => model[i]);
+        
+        voltageMin.push(Math.min(...vValues));
+        voltageMax.push(Math.max(...vValues));
+        temperatureMin.push(Math.min(...tValues));
+        temperatureMax.push(Math.max(...tValues));
+      }
 
       // Create time labels
       const labels = Array.from({ length: steps }, (_, idx) => `${idx * 2}s`);
@@ -597,12 +709,16 @@ const predictWithEnsemble = async () => {
       const voltageCtx = document.getElementById("ensembleVoltageChart");
       const temperatureCtx = document.getElementById("ensembleTemperatureChart");
 
-      // Show forecast as predicted line
-      ensembleVoltageChart = createChart(voltageCtx, labels, [], voltageForecast, "Voltage");
-      ensembleTemperatureChart = createChart(temperatureCtx, labels, [], temperatureForecast, "Temperature");
+      // Show forecast with uncertainty bands
+      ensembleVoltageChart = createEnsembleChart(voltageCtx, labels, voltageForecast, voltageMin, voltageMax, "Voltage");
+      ensembleTemperatureChart = createEnsembleChart(temperatureCtx, labels, temperatureForecast, temperatureMin, temperatureMax, "Temperature");
 
-      document.getElementById("ensembleVoltageSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps * 2}s)`;
-      document.getElementById("ensembleTemperatureSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps * 2}s)`;
+      // Calculate average uncertainty for summary
+      const avgVoltageUncertainty = voltageMax.reduce((sum, max, i) => sum + (max - voltageMin[i]), 0) / steps;
+      const avgTempUncertainty = temperatureMax.reduce((sum, max, i) => sum + (max - temperatureMin[i]), 0) / steps;
+
+      document.getElementById("ensembleVoltageSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps * 2}s) | Avg Uncertainty: ±${(avgVoltageUncertainty / 2).toFixed(3)}V`;
+      document.getElementById("ensembleTemperatureSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps * 2}s) | Avg Uncertainty: ±${(avgTempUncertainty / 2).toFixed(2)}°C`;
 
       document.getElementById("ensembleDownloadVoltage").disabled = false;
       document.getElementById("ensembleDownloadTemperature").disabled = false;
