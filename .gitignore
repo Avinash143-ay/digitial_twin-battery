@@ -29,3 +29,12 @@ Thumbs.db
 
 # Logs
 *.log
+# Presentation and demo files
+DEMO_SCRIPT.md
+POWERPOINT_OUTLINE.md
+PRESENTATION_GUIDE.md
+WHY_TWO_MODELS.md
+demo_*.csv
+
+# Training notebook (optional - uncomment if you don't want to share)
+# predictions.ipynb

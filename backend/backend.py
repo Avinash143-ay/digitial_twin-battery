@@ -160,8 +160,10 @@ model = v9_rescaling_adaptive_TransformerModel3Decoder(
 )
 
 # Load Transformer model weights
+import os
+script_dir = os.path.dirname(os.path.abspath(__file__))
 try:
-    saved_model_path = '../models/simulator_cpu.pth'
+    saved_model_path = os.path.join(script_dir, '..', 'models', 'simulator_cpu.pth')
     model_state_dict = torch.load(saved_model_path, map_location=torch.device('cpu'))
     model.load_state_dict(model_state_dict)
     model.eval()
@@ -176,7 +178,7 @@ print("Loading DeepEnsemble model...")
 ensemble_model = DeepEnsemble(num_models=10)
 
 try:
-    ensemble_path = '../models/digital_twin_simpler.pt'
+    ensemble_path = os.path.join(script_dir, '..', 'models', 'digital_twin_simpler.pt')
     checkpoint = torch.load(ensemble_path, map_location=torch.device('cpu'))
     if "state_dict" in checkpoint:
         ensemble_model.load_state_dict(checkpoint["state_dict"])

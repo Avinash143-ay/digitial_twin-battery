@@ -51,7 +51,7 @@ generateCurrentBtn.addEventListener('click', () => {
   
   currentData = new Array(steps).fill(current);
   
-  currentInfo.innerHTML = `✓ Generated ${steps} constant current values (${current}A for ${steps * 2}s)`;
+  currentInfo.innerHTML = `✓ Generated ${steps} constant current values (${current}A for ${steps}s)`;
   currentInfo.classList.add('show');
   predictBtn.disabled = false;
   updateStatus(`Current profile ready - ${steps} steps at ${current}A`, 'loaded');
@@ -113,7 +113,7 @@ currentInput.addEventListener('change', (event) => {
     const currentIndex = headers.indexOf('current');
     currentData = rows.map(row => parseFloat(row[currentIndex])).filter(val => !isNaN(val));
     
-    currentInfo.innerHTML = `✓ Loaded ${currentData.length} current values (${currentData.length * 2}s duration)`;
+    currentInfo.innerHTML = `✓ Loaded ${currentData.length} current values (${currentData.length}s duration)`;
     currentInfo.classList.add('show');
     predictBtn.disabled = false;
     updateStatus(`Current data loaded - ${currentData.length} samples ready`, 'loaded');
@@ -163,7 +163,7 @@ const predictBatteryBehavior = async () => {
       const temperatureForecast = result.temperature_forecast;
 
       // Create time labels
-      const labels = Array.from({ length: steps }, (_, idx) => `${idx * 2}s`);
+      const labels = Array.from({ length: steps }, (_, idx) => `${idx}s`);
 
       destroyPredictCharts();
 
@@ -174,13 +174,13 @@ const predictBatteryBehavior = async () => {
       predictVoltageChart = createChart(voltageCtx, labels, [], voltageForecast, "Voltage");
       predictTemperatureChart = createChart(temperatureCtx, labels, [], temperatureForecast, "Temperature");
 
-      document.getElementById("predictVoltageSummary").textContent = `Forecast: ${steps} steps (${steps * 2}s)`;
-      document.getElementById("predictTemperatureSummary").textContent = `Forecast: ${steps} steps (${steps * 2}s)`;
+      document.getElementById("predictVoltageSummary").textContent = `Forecast: ${steps} steps (${steps}s)`;
+      document.getElementById("predictTemperatureSummary").textContent = `Forecast: ${steps} steps (${steps}s)`;
 
       document.getElementById("predictDownloadVoltage").disabled = false;
       document.getElementById("predictDownloadTemperature").disabled = false;
 
-      updateStatus(`Forecast Complete - ${steps} steps (${steps * 2}s) | SOH: ${soh}`, "complete");
+      updateStatus(`Forecast Complete - ${steps} steps (${steps}s) | SOH: ${soh}`, "complete");
     } else {
       throw new Error(result.message || 'Unknown error');
     }
@@ -229,21 +229,73 @@ const buildSeries = (rows, indexMap, columnName) =>
     .map((row) => toNumber(row[indexMap[columnName]]))
     .filter((value) => value !== null);
 
-const createChart = (ctx, labels, actual, predicted, title) =>
-  new Chart(ctx, {
+// Helper function to find voltage threshold crossings
+const findVoltageThresholds = (voltageData, labels, title) => {
+  const annotations = {};
+  
+  if (!title.toLowerCase().includes('voltage')) {
+    return annotations;
+  }
+  
+  // Find first occurrence of 4.2V threshold
+  const maxIndex = voltageData.findIndex(v => v >= 4.2);
+  if (maxIndex !== -1) {
+    annotations.maxVoltage = {
+      type: 'line',
+      xMin: maxIndex,
+      xMax: maxIndex,
+      borderColor: 'rgba(220, 38, 38, 0.8)',
+      borderWidth: 2,
+      borderDash: [6, 6],
+      label: {
+        display: true,
+        content: `4.2V at ${labels[maxIndex] || maxIndex}s`,
+        position: 'start',
+        backgroundColor: 'rgba(220, 38, 38, 0.8)',
+        color: 'white',
+        font: {
+          size: 11,
+          weight: 'bold'
+        },
+        padding: 6
+      }
+    };
+  }
+  
+  // Find first occurrence of 2.5V threshold
+  const minIndex = voltageData.findIndex(v => v <= 2.5);
+  if (minIndex !== -1) {
+    annotations.minVoltage = {
+      type: 'line',
+      xMin: minIndex,
+      xMax: minIndex,
+      borderColor: 'rgba(220, 38, 38, 0.8)',
+      borderWidth: 2,
+      borderDash: [6, 6],
+      label: {
+        display: true,
+        content: `2.5V at ${labels[minIndex] || minIndex}s`,
+        position: 'start',
+        backgroundColor: 'rgba(220, 38, 38, 0.8)',
+        color: 'white',
+        font: {
+          size: 11,
+          weight: 'bold'
+        },
+        padding: 6
+      }
+    };
+  }
+  
+  return annotations;
+};
+
+const createChart = (ctx, labels, actual, predicted, title) => {
+  return new Chart(ctx, {
     type: "line",
     data: {
       labels,
       datasets: [
-        {
-          label: `${title} Actual`,
-          data: actual,
-          borderColor: "#2563eb",
-          backgroundColor: "rgba(37, 99, 235, 0.1)",
-          tension: 0.3,
-          pointRadius: actual.length > 500 ? 0 : 3,
-          borderWidth: 2,
-        },
         {
           label: `${title} Predicted`,
           data: predicted,
@@ -259,7 +311,7 @@ const createChart = (ctx, labels, actual, predicted, title) =>
       responsive: true,
       maintainAspectRatio: false,
       animation: {
-        duration: actual.length > 1000 ? 0 : 750,
+        duration: predicted.length > 1000 ? 0 : 750,
       },
       interaction: {
         mode: "index",
@@ -296,10 +348,15 @@ const createChart = (ctx, labels, actual, predicted, title) =>
       },
     },
   });
+};
 
 // Create ensemble chart with uncertainty bands
-const createEnsembleChart = (ctx, labels, median, min, max, title) =>
-  new Chart(ctx, {
+const createEnsembleChart = (ctx, labels, median, min, max, title) => {
+  // Combine median, min, max for threshold detection
+  const allVoltageData = [...median, ...min, ...max].filter(v => v != null);
+  const annotations = findVoltageThresholds(allVoltageData, labels, title);
+  
+  return new Chart(ctx, {
     type: "line",
     data: {
       labels,
@@ -370,6 +427,9 @@ const createEnsembleChart = (ctx, labels, median, min, max, title) =>
           enabled: true,
           algorithm: "lttb",
         },
+        annotation: {
+          annotations: annotations
+        }
       },
       scales: {
         x: {
@@ -390,6 +450,7 @@ const createEnsembleChart = (ctx, labels, median, min, max, title) =>
       },
     },
   });
+};
 
 const updateSummary = (element, actual, predicted) => {
   if (!actual.length || !predicted.length) {
@@ -490,7 +551,7 @@ const handleCsv = (text) => {
     const tempPredPlot = tempPred.slice(0, displayLimit);
 
     // Create time labels (0s, 2s, 4s, 6s, ...)
-    const labels = Array.from({ length: Math.max(voltageActualPlot.length, tempActualPlot.length) }, (_, idx) => `${idx * 2}s`);
+    const labels = Array.from({ length: Math.max(voltageActualPlot.length, tempActualPlot.length) }, (_, idx) => `${idx}s`);
 
     destroyCompareCharts();
 
@@ -507,7 +568,7 @@ const handleCsv = (text) => {
     compareDownloadTemperature.disabled = false;
     
     const displayedPoints = Math.min(maxLength, displayLimit);
-    updateStatus(`CSV Uploaded - Displaying ${displayedPoints} of ${maxLength} samples (${displayedPoints * 2}s duration)`, "complete");
+    updateStatus(`CSV Uploaded - Displaying ${displayedPoints} of ${maxLength} samples (${displayedPoints}s duration)`, "complete");
   }, 50);
 };
 
@@ -597,7 +658,7 @@ ensembleGenerateCurrentBtn.addEventListener('click', () => {
   
   ensembleCurrentData = new Array(steps).fill(current);
   
-  ensembleCurrentInfo.innerHTML = `✓ Generated ${steps} constant current values (${current}A for ${steps * 2}s)`;
+  ensembleCurrentInfo.innerHTML = `✓ Generated ${steps} constant current values (${current}A for ${steps}s)`;
   ensembleCurrentInfo.classList.add('show');
   ensemblePredictBtn.disabled = false;
   updateStatus(`Ensemble current profile ready - ${steps} steps at ${current}A`, 'loaded');
@@ -634,7 +695,7 @@ ensembleCurrentInput.addEventListener('change', (event) => {
       ensembleCurrentData = ensembleCurrentData.slice(0, 75);
     }
     
-    ensembleCurrentInfo.innerHTML = `✓ Loaded ${ensembleCurrentData.length} current values (${ensembleCurrentData.length * 2}s duration)`;
+    ensembleCurrentInfo.innerHTML = `✓ Loaded ${ensembleCurrentData.length} current values (${ensembleCurrentData.length}s duration)`;
     ensembleCurrentInfo.classList.add('show');
     ensemblePredictBtn.disabled = false;
     updateStatus(`Ensemble current data loaded - ${ensembleCurrentData.length} samples ready`, 'loaded');
@@ -702,7 +763,7 @@ const predictWithEnsemble = async () => {
       }
 
       // Create time labels
-      const labels = Array.from({ length: steps }, (_, idx) => `${idx * 2}s`);
+      const labels = Array.from({ length: steps }, (_, idx) => `${idx}s`);
 
       destroyEnsembleCharts();
 
@@ -717,13 +778,13 @@ const predictWithEnsemble = async () => {
       const avgVoltageUncertainty = voltageMax.reduce((sum, max, i) => sum + (max - voltageMin[i]), 0) / steps;
       const avgTempUncertainty = temperatureMax.reduce((sum, max, i) => sum + (max - temperatureMin[i]), 0) / steps;
 
-      document.getElementById("ensembleVoltageSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps * 2}s) | Avg Uncertainty: ±${(avgVoltageUncertainty / 2).toFixed(3)}V`;
-      document.getElementById("ensembleTemperatureSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps * 2}s) | Avg Uncertainty: ±${(avgTempUncertainty / 2).toFixed(2)}°C`;
+      document.getElementById("ensembleVoltageSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps}s) | Avg Uncertainty: ±${(avgVoltageUncertainty / 2).toFixed(3)}V`;
+      document.getElementById("ensembleTemperatureSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps}s) | Avg Uncertainty: ±${(avgTempUncertainty / 2).toFixed(2)}°C`;
 
       document.getElementById("ensembleDownloadVoltage").disabled = false;
       document.getElementById("ensembleDownloadTemperature").disabled = false;
 
-      updateStatus(`Ensemble Forecast Complete - ${steps} steps (${steps * 2}s) | Age: ${relativeAge}`, "complete");
+      updateStatus(`Ensemble Forecast Complete - ${steps} steps (${steps}s) | Age: ${relativeAge}`, "complete");
     } else {
       throw new Error(result.message || 'Unknown error');
     }
