@@ -73,6 +73,8 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     // Update status
     if (tabName === 'predict') {
       updateStatus('Ready - Upload current data and set initial conditions', 'ready');
+    } else if (tabName === 'datasetCompare') {
+      updateStatus('Ready - Load a segment from KIT dataset to compare models', 'ready');
     } else if (tabName === 'compare') {
       updateStatus('Ready - Upload CSV for comparison', 'ready');
     } else if (tabName === 'ensemble') {
@@ -291,21 +293,37 @@ const findVoltageThresholds = (voltageData, labels, title) => {
 };
 
 const createChart = (ctx, labels, actual, predicted, title) => {
+  const datasets = [
+    {
+      label: `${title} Predicted`,
+      data: predicted,
+      borderColor: "#f97316",
+      backgroundColor: "rgba(249, 115, 22, 0.1)",
+      tension: 0.3,
+      pointRadius: predicted.length > 500 ? 0 : 3,
+      borderWidth: 2,
+    },
+  ];
+  
+  // Add actual data line if provided
+  if (actual && actual.length > 0) {
+    datasets.unshift({
+      label: `${title} Actual`,
+      data: actual,
+      borderColor: "#3b82f6",
+      backgroundColor: "rgba(59, 130, 246, 0.1)",
+      borderDash: [5, 5],
+      tension: 0.3,
+      pointRadius: actual.length > 500 ? 0 : 3,
+      borderWidth: 2,
+    });
+  }
+  
   return new Chart(ctx, {
     type: "line",
     data: {
       labels,
-      datasets: [
-        {
-          label: `${title} Predicted`,
-          data: predicted,
-          borderColor: "#f97316",
-          backgroundColor: "rgba(249, 115, 22, 0.1)",
-          tension: 0.3,
-          pointRadius: predicted.length > 500 ? 0 : 3,
-          borderWidth: 2,
-        },
-      ],
+      datasets,
     },
     options: {
       responsive: true,
@@ -459,12 +477,19 @@ const updateSummary = (element, actual, predicted) => {
   }
 
   const count = Math.min(actual.length, predicted.length);
+  
+  // Calculate RMSE
   const mse = actual
     .slice(0, count)
     .reduce((acc, value, index) => acc + (value - predicted[index]) ** 2, 0) / count;
   const rmse = Math.sqrt(mse);
+  
+  // Calculate MAE
+  const mae = actual
+    .slice(0, count)
+    .reduce((acc, value, index) => acc + Math.abs(value - predicted[index]), 0) / count;
 
-  element.textContent = `Samples: ${count} · RMSE: ${rmse.toFixed(4)}`;
+  element.textContent = `Samples: ${count} · RMSE: ${rmse.toFixed(4)} · MAE: ${mae.toFixed(4)}`;
 };
 
 const destroyPredictCharts = () => {
@@ -551,7 +576,7 @@ const handleCsv = (text) => {
     const tempPredPlot = tempPred.slice(0, displayLimit);
 
     // Create time labels (0s, 2s, 4s, 6s, ...)
-    const labels = Array.from({ length: Math.max(voltageActualPlot.length, tempActualPlot.length) }, (_, idx) => `${idx}s`);
+    const labels = Array.from({ length: Math.max(voltageActualPlot.length, tempActualPlot.length) }, (_, idx) => `${idx*2}s`);
 
     destroyCompareCharts();
 
@@ -568,7 +593,7 @@ const handleCsv = (text) => {
     compareDownloadTemperature.disabled = false;
     
     const displayedPoints = Math.min(maxLength, displayLimit);
-    updateStatus(`CSV Uploaded - Displaying ${displayedPoints} of ${maxLength} samples (${displayedPoints}s duration)`, "complete");
+    updateStatus(`CSV Uploaded - Displaying ${displayedPoints} of ${maxLength} samples (${displayedPoints*2}s duration)`, "complete");
   }, 50);
 };
 
@@ -762,8 +787,8 @@ const predictWithEnsemble = async () => {
         temperatureMax.push(Math.max(...tValues));
       }
 
-      // Create time labels
-      const labels = Array.from({ length: steps }, (_, idx) => `${idx}s`);
+      // Create time labels (2 seconds per step)
+      const labels = Array.from({ length: steps }, (_, idx) => `${idx*2}s`);
 
       destroyEnsembleCharts();
 
@@ -778,13 +803,13 @@ const predictWithEnsemble = async () => {
       const avgVoltageUncertainty = voltageMax.reduce((sum, max, i) => sum + (max - voltageMin[i]), 0) / steps;
       const avgTempUncertainty = temperatureMax.reduce((sum, max, i) => sum + (max - temperatureMin[i]), 0) / steps;
 
-      document.getElementById("ensembleVoltageSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps}s) | Avg Uncertainty: ±${(avgVoltageUncertainty / 2).toFixed(3)}V`;
-      document.getElementById("ensembleTemperatureSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps}s) | Avg Uncertainty: ±${(avgTempUncertainty / 2).toFixed(2)}°C`;
+      document.getElementById("ensembleVoltageSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps*2}s) | Avg Uncertainty: ±${(avgVoltageUncertainty / 2).toFixed(3)}V`;
+      document.getElementById("ensembleTemperatureSummary").textContent = `Ensemble Forecast: ${steps} steps (${steps*2}s) | Avg Uncertainty: ±${(avgTempUncertainty / 2).toFixed(2)}°C`;
 
       document.getElementById("ensembleDownloadVoltage").disabled = false;
       document.getElementById("ensembleDownloadTemperature").disabled = false;
 
-      updateStatus(`Ensemble Forecast Complete - ${steps} steps (${steps}s) | Age: ${relativeAge}`, "complete");
+      updateStatus(`Ensemble Forecast Complete - ${steps} steps (${steps*2}s) | Age: ${relativeAge}`, "complete");
     } else {
       throw new Error(result.message || 'Unknown error');
     }
@@ -814,4 +839,485 @@ document.getElementById("ensembleDownloadTemperature").addEventListener("click",
   link.href = ensembleTemperatureChart.toBase64Image();
   link.download = "ensemble-temperature-chart.png";
   link.click();
+});
+
+// ================================
+// MODEL COMPARISON TAB FUNCTIONALITY
+// ================================
+
+let mcCurrentData = null;
+let mcVoltageChart = null;
+let mcTemperatureChart = null;
+
+// Current mode switching
+document.querySelectorAll('input[name="mcCurrentMode"]').forEach(radio => {
+  radio.addEventListener('change', (e) => {
+    const mode = e.target.value;
+    document.getElementById('mcConstantCurrentSection').style.display = mode === 'constant' ? 'block' : 'none';
+    document.getElementById('mcCSVCurrentSection').style.display = mode === 'csv' ? 'block' : 'none';
+    mcCurrentData = null;
+    document.getElementById('mcCurrentInfo').classList.remove('show');
+    document.getElementById('mcCompareBtn').disabled = mode === 'csv';
+  });
+});
+
+// Generate constant current profile
+document.getElementById('mcGenerateCurrentBtn').addEventListener('click', () => {
+  const current = parseFloat(document.getElementById('mcConstantCurrent').value);
+  const steps = parseInt(document.getElementById('mcCurrentSteps').value);
+  
+  mcCurrentData = Array(steps).fill(current);
+  
+  const infoBox = document.getElementById('mcCurrentInfo');
+  const infoText = document.getElementById('mcCurrentInfoText');
+  infoText.textContent = `✓ Generated ${steps} steps of ${current}A constant current`;
+  infoBox.classList.add('show');
+  document.getElementById('mcCompareBtn').disabled = false;
+});
+
+// CSV upload
+document.getElementById('mcCurrentInput').addEventListener('change', (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const text = e.target.result;
+    const { headers, rows } = parseCsv(text);
+    
+    if (!headers.includes('current')) {
+      updateStatus('Error: CSV must contain a "current" column', 'ready');
+      return;
+    }
+    
+    const currentIndex = headers.indexOf('current');
+    mcCurrentData = rows.map(row => parseFloat(row[currentIndex])).filter(v => !isNaN(v)).slice(0, 75);
+    
+    const infoBox = document.getElementById('mcCurrentInfo');
+    const infoText = document.getElementById('mcCurrentInfoText');
+    infoText.textContent = `✓ Loaded ${mcCurrentData.length} current values from CSV`;
+    infoBox.classList.add('show');
+    document.getElementById('mcCompareBtn').disabled = false;
+  };
+  reader.readAsText(file);
+});
+
+// Main comparison function
+const compareModels = async () => {
+  if (!mcCurrentData) {
+    updateStatus('Error: Please generate or upload current data first', 'ready');
+    return;
+  }
+  
+  const soh = parseFloat(document.getElementById('mcSOH').value);
+  const voltage = parseFloat(document.getElementById('mcVoltage').value);
+  const temperature = parseFloat(document.getElementById('mcTemperature').value);
+  const steps = Math.min(mcCurrentData.length, 75); // Ensemble max
+  const currentDataSliced = mcCurrentData.slice(0, steps);
+  
+  updateStatus(`Comparing models... (${steps} steps)`, "loading");
+  document.getElementById('mcCompareBtn').disabled = true;
+  
+  try {
+    // Call Transformer model
+    const transformerResponse = await fetch('http://localhost:5000/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        soh,
+        voltage,
+        temperature,
+        current_data: currentDataSliced,
+        steps
+      })
+    });
+    
+    if (!transformerResponse.ok) throw new Error('Transformer prediction failed');
+    const transformerResult = await transformerResponse.json();
+    
+    // Call DeepEnsemble model
+    const relativeAge = 1 - soh;
+    const ensembleResponse = await fetch('http://localhost:5000/predict_ensemble', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        relative_age: relativeAge,
+        voltage,
+        temperature,
+        current_data: currentDataSliced,
+        steps
+      })
+    });
+    
+    if (!ensembleResponse.ok) throw new Error('Ensemble prediction failed');
+    const ensembleResult = await ensembleResponse.json();
+    
+    // Extract predictions
+    const transformerVoltage = transformerResult.voltage_forecast;
+    const transformerTemp = transformerResult.temperature_forecast;
+    const ensembleVoltage = ensembleResult.voltage_forecast;
+    const ensembleTemp = ensembleResult.temperature_forecast;
+    
+    // Create time labels
+    const labels = Array.from({ length: steps }, (_, idx) => `${idx}s`);
+    
+    // Destroy old charts
+    if (mcVoltageChart) mcVoltageChart.destroy();
+    if (mcTemperatureChart) mcTemperatureChart.destroy();
+    
+    // Create comparison charts
+    const voltageCtx = document.getElementById("mcVoltageChart");
+    const temperatureCtx = document.getElementById("mcTemperatureChart");
+    
+    mcVoltageChart = createComparisonChart(voltageCtx, labels, transformerVoltage, ensembleVoltage, "Voltage");
+    mcTemperatureChart = createComparisonChart(temperatureCtx, labels, transformerTemp, ensembleTemp, "Temperature");
+    
+    // Calculate prediction differences (for comparison scoring)
+    const voltageDiff = transformerVoltage.map((v, i) => Math.abs(v - ensembleVoltage[i]));
+    const tempDiff = transformerTemp.map((v, i) => Math.abs(v - ensembleTemp[i]));
+    
+const avgVoltageDiff = voltageDiff.reduce((a, b) => a + b, 0) / voltageDiff.length;
+    const avgTempDiff = tempDiff.reduce((a, b) => a + b, 0) / tempDiff.length;
+    
+    // Update summaries
+    document.getElementById("mcVoltageSummary").textContent = 
+      `Transformer vs Ensemble: Avg difference ${avgVoltageDiff.toFixed(4)}V`;
+    document.getElementById("mcTemperatureSummary").textContent = 
+      `Transformer vs Ensemble: Avg difference ${avgTempDiff.toFixed(3)}°C`;
+    
+    // Show that comparison is done (no actual values to compare against)
+    document.getElementById("mcResults").style.display = "block";
+    document.getElementById("mcTransformerVoltageScore").textContent = "Prediction Complete";
+    document.getElementById("mcEnsembleVoltageScore").textContent = "Prediction Complete";
+    document.getElementById("mcTransformerTempScore").textContent = "Prediction Complete";
+    document.getElementById("mcEnsembleTempScore").textContent = "Prediction Complete";
+    document.getElementById("mcVoltageWinner").textContent = 
+      `ℹ️ To determine accuracy, compare these predictions against actual measurements in Compare Mode tab`;
+    document.getElementById("mcTempWinner").textContent = "";
+    
+    document.getElementById("mcDownloadVoltage").disabled = false;
+    document.getElementById("mcDownloadTemperature").disabled = false;
+    
+    updateStatus(`Comparison Complete - Both models predicted ${steps} steps`, "complete");
+    
+  } catch (error) {
+    console.error('Comparison error:', error);
+    updateStatus(`Error: ${error.message}. Make sure backend server is running.`, "ready");
+  } finally {
+    document.getElementById('mcCompareBtn').disabled = false;
+  }
+};
+
+document.getElementById('mcCompareBtn').addEventListener('click', compareModels);
+
+// Create comparison chart with both model predictions
+const createComparisonChart = (ctx, labels, transformerData, ensembleData, title) => {
+  return new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: `🔮 Transformer ${title}`,
+          data: transformerData,
+          borderColor: "#f97316",
+          backgroundColor: "rgba(249, 115, 22, 0.1)",
+          tension: 0.3,
+          pointRadius: transformerData.length > 500 ? 0 : 3,
+          borderWidth: 2,
+        },
+        {
+          label: `🎯 DeepEnsemble ${title}`,
+          data: ensembleData,
+          borderColor: "#3b82f6",
+          backgroundColor: "rgba(59, 130, 246, 0.1)",
+          tension: 0.3,
+          pointRadius: ensembleData.length > 500 ? 0 : 3,
+          borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: {
+        duration: transformerData.length > 1000 ? 0 : 750,
+      },
+      interaction: {
+        mode: "index",
+        intersect: false,
+      },
+      plugins: {
+        legend: {
+          position: "top",
+        },
+        tooltip: {
+          enabled: true,
+          callbacks: {
+            afterBody: function(context) {
+              if (context.length >= 2) {
+                const transformer = context[0].parsed.y;
+                const ensemble = context[1].parsed.y;
+                const diff = Math.abs(transformer - ensemble);
+                return `Difference: ${diff.toFixed(4)}`;
+              }
+            }
+          }
+        },
+      },
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: "Time (seconds)",
+          },
+          ticks: {
+            maxTicksLimit: 10,
+          },
+        },
+        y: {
+          title: {
+            display: true,
+            text: title,
+          },
+        },
+      },
+    },
+  });
+};
+
+// Download buttons
+document.getElementById("mcDownloadVoltage").addEventListener("click", () => {
+  if (!mcVoltageChart) return;
+  const link = document.createElement("a");
+  link.href = mcVoltageChart.toBase64Image();
+  link.download = "model-comparison-voltage.png";
+  link.click();
+});
+
+document.getElementById("mcDownloadTemperature").addEventListener("click", () => {
+  if (!mcTemperatureChart) return;
+  const link = document.createElement("a");
+  link.href = mcTemperatureChart.toBase64Image();
+  link.download = "model-comparison-temperature.png";
+  link.click();
+});
+
+// DATASET COMPARISON FUNCTIONALITY
+let datasetVoltageChart, datasetTemperatureChart;
+
+document.getElementById("datasetCompareBtn").addEventListener("click", async () => {
+  const startIndex = parseInt(document.getElementById("datasetStartIndex").value);
+  const sequenceLength = parseInt(document.getElementById("datasetSequenceLength").value);
+  
+  updateStatus(`Loading dataset segment from index ${startIndex}...`, "loading");
+  document.getElementById("datasetCompareBtn").disabled = true;
+  
+  try {
+    const response = await fetch('http://localhost:5000/compare_with_dataset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        start_index: startIndex,
+        sequence_length: sequenceLength
+      })
+    });
+    
+    if (!response.ok) throw new Error('Dataset comparison failed');
+    const result = await response.json();
+    
+    // Extract data
+    const labels = Array.from({ length: result.actual.voltage.length }, (_, idx) => `${idx}s`);
+    const actualVoltage = result.actual.voltage;
+    const actualTemp = result.actual.temperature;
+    const moeVoltage = result.moe.voltage;
+    const moeTemp = result.moe.temperature;
+    const ensembleVoltage = result.ensemble.voltage;
+    const ensembleTemp = result.ensemble.temperature;
+    
+    // Show results card
+    document.getElementById("datasetResultsCard").style.display = "block";
+    document.getElementById("datasetMoeVoltageMAPE").textContent = result.moe.voltage_mape.toFixed(4) + "%";
+    document.getElementById("datasetMoeTempMAE").textContent = result.moe.temp_mae.toFixed(4) + "°C";
+    document.getElementById("datasetEnsembleVoltageMAPE").textContent = result.ensemble.voltage_mape.toFixed(4) + "%";
+    document.getElementById("datasetEnsembleTempMAE").textContent = result.ensemble.temp_mae.toFixed(4) + "°C";
+    
+    // Determine winner
+    const moeWins = result.moe.voltage_mape < result.ensemble.voltage_mape;
+    document.getElementById("datasetWinnerMessage").textContent = moeWins 
+      ? "⭐ MoE Transformer wins with better accuracy!"
+      : "⭐ Deep Ensemble wins with better accuracy!";
+    document.getElementById("datasetWinnerMessage").style.background = moeWins ? "#e8f5e9" : "#e3f2fd";
+    
+    // Destroy old charts
+    if (datasetVoltageChart) datasetVoltageChart.destroy();
+    if (datasetTemperatureChart) datasetTemperatureChart.destroy();
+    
+    // Create voltage chart
+    const voltageCtx = document.getElementById("datasetVoltageChart");
+    datasetVoltageChart = new Chart(voltageCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "⚫ Actual (KIT Dataset)",
+            data: actualVoltage,
+            borderColor: "#000000",
+            backgroundColor: "rgba(0, 0, 0, 0.1)",
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 3,
+            tension: 0.1
+          },
+          {
+            label: "🟢 MoE Transformer",
+            data: moeVoltage,
+            borderColor: "#48bb78",
+            backgroundColor: "rgba(72, 187, 120, 0.1)",
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+            tension: 0.3
+          },
+          {
+            label: "🔵 Deep Ensemble",
+            data: ensembleVoltage,
+            borderColor: "#3b82f6",
+            backgroundColor: "rgba(59, 130, 246, 0.1)",
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+            tension: 0.3
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "top" },
+          tooltip: { enabled: true }
+        },
+        scales: {
+          x: { title: { display: true, text: "Time (seconds)" } },
+          y: { title: { display: true, text: "Voltage (V)" } }
+        }
+      }
+    });
+    
+    // Create temperature chart
+    const tempCtx = document.getElementById("datasetTemperatureChart");
+    datasetTemperatureChart = new Chart(tempCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "⚫ Actual (KIT Dataset)",
+            data: actualTemp,
+            borderColor: "#000000",
+            backgroundColor: "rgba(0, 0, 0, 0.1)",
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            borderWidth: 3,
+            tension: 0.1
+          },
+          {
+            label: "🟢 MoE Transformer",
+            data: moeTemp,
+            borderColor: "#48bb78",
+            backgroundColor: "rgba(72, 187, 120, 0.1)",
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+            tension: 0.3
+          },
+          {
+            label: "🔵 Deep Ensemble",
+            data: ensembleTemp,
+            borderColor: "#3b82f6",
+            backgroundColor: "rgba(59, 130, 246, 0.1)",
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+            tension: 0.3
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "top" },
+          tooltip: { enabled: true }
+        },
+        scales: {
+          x: { title: { display: true, text: "Time (seconds)" } },
+          y: { title: { display: true, text: "Temperature (°C)" } }
+        }
+      }
+    });
+    
+    // Update summaries
+    document.getElementById("datasetVoltageSummary").textContent = 
+      `Segment from index ${startIndex}: MoE ${result.moe.voltage_mape.toFixed(3)}% vs Ensemble ${result.ensemble.voltage_mape.toFixed(3)}%`;
+    document.getElementById("datasetTemperatureSummary").textContent = 
+      `Segment from index ${startIndex}: MoE ${result.moe.temp_mae.toFixed(3)}°C vs Ensemble ${result.ensemble.temp_mae.toFixed(3)}°C`;
+    
+    // Enable download buttons
+    document.getElementById("datasetDownloadVoltage").disabled = false;
+    document.getElementById("datasetDownloadTemperature").disabled = false;
+    
+    updateStatus(`Dataset comparison complete - Segment loaded from index ${startIndex}`, "complete");
+    
+  } catch (error) {
+    console.error('Dataset comparison error:', error);
+    updateStatus(`Error: ${error.message}. Make sure backend server is running.`, "ready");
+  } finally {
+    document.getElementById("datasetCompareBtn").disabled = false;
+  }
+});
+
+// Download buttons for dataset comparison
+document.getElementById("datasetDownloadVoltage").addEventListener("click", () => {
+  if (!datasetVoltageChart) return;
+  const link = document.createElement("a");
+  link.href = datasetVoltageChart.toBase64Image();
+  link.download = "dataset-comparison-voltage.png";
+  link.click();
+});
+
+document.getElementById("datasetDownloadTemperature").addEventListener("click", () => {
+  if (!datasetTemperatureChart) return;
+  const link = document.createElement("a");
+  link.href = datasetTemperatureChart.toBase64Image();
+  link.download = "dataset-comparison-temperature.png";
+  link.click();
+});
+
+// Handle URL parameters for auto-loading segments
+window.addEventListener('DOMContentLoaded', () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const tab = urlParams.get('tab');
+  const index = urlParams.get('index');
+  
+  if (tab === 'datasetCompare' && index) {
+    // Switch to dataset comparison tab
+    const tabBtn = document.querySelector('[data-tab="datasetCompare"]');
+    if (tabBtn) {
+      tabBtn.click();
+      
+      // Wait a bit for tab to load, then set the index and trigger load
+      setTimeout(() => {
+        const indexInput = document.getElementById('datasetStartIndex');
+        if (indexInput) {
+          indexInput.value = index;
+          document.getElementById('datasetCompareBtn').click();
+        }
+      }, 300);
+    }
+  }
 });

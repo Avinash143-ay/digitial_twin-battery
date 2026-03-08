@@ -69,107 +69,224 @@ class DeepEnsemble(nn.Module):
         outputs = torch.stack(outputs, dim=0)
         return outputs
 
-# Define the Transformer model architecture
-class v9_rescaling_adaptive_TransformerModel3Decoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, nhead, num_layers, max_len=150, dropout=0.5):
-        super(v9_rescaling_adaptive_TransformerModel3Decoder, self).__init__()
-        self.linear_in = nn.Linear(input_dim+1, hidden_dim)
-        self.linear_in_1= nn.Linear(hidden_dim, hidden_dim)
+# MoE Layer for the Digital Twin
+class MoELayer(nn.Module):
+    def __init__(self, input_dim, output_dim, aggregate_expert_hparam=1000, top_k=20,
+                 calculated_to_noise_ratio=1):
+        super(MoELayer, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.aggregate_hparam = aggregate_expert_hparam
+        self.aggregate_expert_size = (self.aggregate_hparam) * (input_dim * output_dim)
+        self.aggregate_expert_number = self.aggregate_expert_size // self.input_dim
+        self.MoE_shape = (self.aggregate_expert_number, self.input_dim)
+        self.mixture_experts = nn.Parameter(torch.nn.init.xavier_uniform_(torch.empty(self.MoE_shape)))
+        self.top_K = top_k
+        self.c2nr = calculated_to_noise_ratio
+        
+    def forward(self, x, calculated_to_noise_ratio):
+        scores = torch.einsum("ijk,lk->ijl", x, self.mixture_experts)
+        scores = scores.reshape(x.shape[0], x.shape[1], self.output_dim, self.aggregate_hparam)
+        score_softmax = torch.mean(scores, dim=2)
+        
+        softmax_output = torch.softmax(score_softmax, dim=2)
+        gaussian_tensor = torch.softmax(torch.randn(score_softmax.shape, device=x.device), dim=2)
+        
+        orignal_ratio = self.c2nr * softmax_output
+        noise = (1 - self.c2nr) * gaussian_tensor
+        softmax_output_final = orignal_ratio + noise
+        
+        topk_indices = torch.topk(softmax_output_final, self.top_K, dim=2).indices
+        topk_indices = topk_indices.unsqueeze(-1)
+        scores_ = scores.permute(0, 1, 3, 2)
+        scores_ = torch.gather(scores_, dim=2, index=topk_indices.expand(-1, -1, -1, self.output_dim))
+        output = torch.sum(scores_, dim=2)
+        return output
 
-        self.layer_norm = nn.LayerNorm(input_dim)  
-        self.layer_norm_final = nn.LayerNorm(output_dim)  
-        # Learnable positional encoding
-        self.positional_encoding = nn.Parameter(torch.zeros(max_len, hidden_dim))
+# MoE-Enhanced Digital Twin Model
+class Digital_Twin_v1(nn.Module):
+    def __init__(self, initial_state_dim, action_max_length, 
+                 output_state_dim, pos_encoding_dims=3, hidden_dim=64, c2nr=1):
+        super(Digital_Twin_v1, self).__init__()
+        self.initial_state_dim = initial_state_dim
+        self.action_max_length = action_max_length
+        self.output_state_dim = output_state_dim
+        self.pos_encoding_dims = pos_encoding_dims
+        self.c2nr = c2nr
+        self.positional_encoding = self.initialize_positional_encoding(pos_encoding_dims=self.pos_encoding_dims)
 
-        # Transformer Decoder layers
-        decoder_layers = nn.TransformerDecoderLayer(d_model=2*hidden_dim, nhead=nhead, dropout=dropout,batch_first=True)
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layers, num_layers)
-        self.scaling_factors_0th = nn.Parameter(torch.ones(1,max_len))
-        self.scaling_factors_1st = nn.Parameter(torch.ones(1,max_len))
+        self.embedding_layer = nn.Linear(self.pos_encoding_dims + initial_state_dim + 2, hidden_dim)
 
-        # Output linear layer
-        self.linear_out1 = nn.Linear(2*hidden_dim, 5*output_dim)
-        self.linear_out2 = nn.Linear(5*output_dim, 2*output_dim)
-        self.linear_out3 = nn.Linear(2*output_dim,1*output_dim)
-        self.conv1d_volt = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
-        self.conv1d_temp = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=3, padding=1)
+        encoder_layer_1 = nn.TransformerEncoderLayer(d_model=64, nhead=2,
+                                                     batch_first=True, dim_feedforward=256, dropout=0)
+        self.encoder_1 = nn.TransformerEncoder(encoder_layer_1, num_layers=2)
 
-        self.gelu = nn.GELU()
-        self.relu = nn.ReLU()
+        self.Moe_layer_1 = MoELayer(input_dim=64, output_dim=100, top_k=20, aggregate_expert_hparam=100)
+        self.Moe_layer_12 = MoELayer(input_dim=100, output_dim=50, top_k=20, aggregate_expert_hparam=100)
+        self.Moe_layer_13 = MoELayer(input_dim=10, output_dim=2, top_k=20, aggregate_expert_hparam=100)
+        self.linear_final = nn.Linear(10, 2)
 
-    def forward(self, initial_state, actions):
-        # Repeat initial state to match action sequence length
+        self.layer_norm1 = nn.LayerNorm(100)
+        self.layer_norm12 = nn.LayerNorm(50)
+        self.dropout_p = 0.15
+        self.dropout_object = nn.Dropout(p=self.dropout_p)
+
+        self.volt_lin_final1 = nn.Linear(50, 30)
+        self.volt_lin_final2 = nn.Linear(30, 30)
+
+        self.volt_lin_esti_1_mu = nn.Linear(30, 30)
+        self.volt_lin_esti_1_mu_trans = nn.TransformerEncoderLayer(d_model=30, nhead=2, batch_first=True, dim_feedforward=128)
+        self.volt_lin_esti_2_mu = nn.Linear(30, 10)
+        self.volt_lin_esti_2_mu_trans = nn.TransformerEncoderLayer(d_model=10, nhead=2, batch_first=True, dim_feedforward=32)
+        self.volt_lin_esti_3_mu = nn.Linear(10, 1)
+
+        self.volt_lin_esti_1_sigma = nn.Linear(30, 30)
+        self.volt_lin_esti_1_sigma_trans = nn.TransformerEncoderLayer(d_model=30, nhead=2, batch_first=True, dim_feedforward=128)
+        self.volt_lin_esti_2_sigma = nn.Linear(30, 10)
+        self.volt_lin_esti_2_sigma_trans = nn.TransformerEncoderLayer(d_model=10, nhead=2, batch_first=True, dim_feedforward=32)
+        self.volt_lin_esti_3_sigma = nn.Linear(10, 1)
+
+        self.temp_lin_final1 = nn.Linear(50, 30)
+        self.temp_lin_final2 = nn.Linear(30, 30)
+        
+        self.temp_lin_esti_1_mu = nn.Linear(30, 30)
+        self.temp_lin_esti_1_mu_trans = nn.TransformerEncoderLayer(d_model=30, nhead=2, batch_first=True, dim_feedforward=128)
+        self.temp_lin_esti_2_mu = nn.Linear(30, 10)
+        self.temp_lin_esti_2_mu_trans = nn.TransformerEncoderLayer(d_model=10, nhead=2, batch_first=True, dim_feedforward=32)
+        self.temp_lin_esti_3_mu = nn.Linear(10, 1)
+
+        self.temp_lin_esti_1_sigma = nn.Linear(30, 30)
+        self.temp_lin_esti_1_sigma_trans = nn.TransformerEncoderLayer(d_model=30, nhead=2, batch_first=True, dim_feedforward=128)
+        self.temp_lin_esti_2_sigma = nn.Linear(30, 10)
+        self.temp_lin_esti_2_sigma_trans = nn.TransformerEncoderLayer(d_model=10, nhead=2, batch_first=True, dim_feedforward=32)
+        self.temp_lin_esti_3_sigma = nn.Linear(10, 1)
+
+    def initialize_positional_encoding(self, pos_encoding_dims=4):
+        positional_encoding = torch.arange(self.action_max_length)
+        positional_encoding = positional_encoding.unsqueeze(1).repeat(1, pos_encoding_dims)
+
+        denominator_exponent_array = torch.arange(pos_encoding_dims)
+        denominator_exponent_array = (2 * (denominator_exponent_array // 2) / pos_encoding_dims)
+        denominator = torch.pow(self.action_max_length, denominator_exponent_array)
+        inputs_before_function = positional_encoding / denominator
+        positional_encoding_ = torch.full_like(inputs_before_function, -1)
+        positional_encoding_[:, 0::2] = torch.sin(inputs_before_function[:, 0::2])
+        positional_encoding_[:, 1::2] = torch.cos(inputs_before_function[:, 1::2])
+        
+        return positional_encoding_
+    
+    def input_processing(self, initial_state, action):
         original_initial_state = initial_state.clone()
-        initial_state[:,1]= initial_state[:,1]/3
-        initial_state[:,2]= initial_state[:,2]/30
-
-        actions = (actions)/5
-        actions_clone_1= actions.clone()
-        actions_clone_2= actions.clone()
+        original_initial_state[:, 0] = original_initial_state[:, 0] * 10  # Normalization for relative_age
+        original_initial_state[:, 1] = original_initial_state[:, 1] / 3  # Voltage Normalization
+        original_initial_state[:, 2] = original_initial_state[:, 2] / 30  # Temperature Normalization
+        original_actions = action.clone()
+        original_actions = original_actions / 5  # Current Normalization
+        
+        actions_clone_1 = action.clone()
+        actions_clone_2 = action.clone()
         actions_delta_shifted = actions_clone_2
-        actions_delta_shifted[:,0:-1,:]-=actions_clone_1[:,1:,:]
-        actions_delta_shifted[:,-1,:]=0
+        actions_delta_shifted[:, 1:, :] -= actions_clone_1[:, 0:-1, :]  # Capture increase every t
+        actions_delta_shifted[:, 0, :] = 0
 
-        power_=10*(actions**2)# It is also scaled
+        modified_initial_state = original_initial_state.unsqueeze(1).repeat(1, original_actions.shape[1], 1)
+        concatenated_features = torch.cat((modified_initial_state, actions_delta_shifted, original_actions), dim=2)
 
-        repeated_original_initial_state = original_initial_state.unsqueeze(1).repeat(1, actions.size(1), 1)
+        return concatenated_features
 
-        initial_state_repeated = initial_state.unsqueeze(1).repeat(1, actions.size(1), 1)
-        transformer_input = torch.cat([initial_state_repeated, actions,actions_delta_shifted], dim=-1)
-        transformer_input = self.linear_in(transformer_input)
-        transformer_input = self.linear_in_1(transformer_input)
+    def forward(self, initial_state, action, inference_mode=False):
+        original_initial_state = initial_state.clone()
+        batch_size = original_initial_state.shape[0]
+        sequence_length = action.size(1)
         
-        pos_encoding = self.positional_encoding[:transformer_input.size(1), :]
-        pos_encoding_expanded = pos_encoding.unsqueeze(0).expand(transformer_input.size(0), -1, -1)
-
-        transformer_input = torch.cat((transformer_input, pos_encoding_expanded), dim=-1)
-
-        tgt_mask = self.generate_square_subsequent_mask(actions.size(1)).to(actions.device)
-        transformer_output = self.transformer_decoder(transformer_input, transformer_input, tgt_mask=tgt_mask)
-
-        predicted_states_residual_1 = self.linear_out1(transformer_output)
-        predicted_states_residual_1 = self.gelu(predicted_states_residual_1)
-        predicted_states_residual_2 = self.linear_out2(predicted_states_residual_1)
-        predicted_states_residual_2 = self.gelu(predicted_states_residual_2)
-        predicted_states_residual_3 = self.linear_out3(predicted_states_residual_2)
-
-        repeated_original_voltage = repeated_original_initial_state[:,:,1]
-        repeated_original_temprature = repeated_original_initial_state[:,:,2]
-
-        predicted_states_voltage = repeated_original_voltage + predicted_states_residual_3[:,:,0]
-        predicted_states_temperature = repeated_original_temprature+ (predicted_states_residual_3[:,:,1]/10)
+        concatenated_features = self.input_processing(initial_state, action)
+        # Use only the positional encoding for the actual sequence length
+        positional_encoding_transformed = self.positional_encoding[:sequence_length, :].unsqueeze(0).repeat(concatenated_features.shape[0], 1, 1)
+        position_encoded_features = torch.cat((concatenated_features, positional_encoding_transformed), dim=2)
         
-        predicted_states_final = torch.stack((predicted_states_voltage, predicted_states_temperature), dim=2)
+        embedding = self.embedding_layer(position_encoded_features)
+        residual_1 = self.encoder_1(embedding)
+        residual_1 = self.Moe_layer_1(residual_1, calculated_to_noise_ratio=1)
+        residual_1 = self.layer_norm1(residual_1)
+        residual_1 = F.gelu(residual_1)
+        residual_1 = self.Moe_layer_12(residual_1, calculated_to_noise_ratio=1)
+        residual_1 = self.layer_norm12(residual_1)
+        residual_1 = F.gelu(residual_1)
 
-        return predicted_states_final
+        residual_1_v = F.gelu(self.volt_lin_final1(residual_1))
+        residual_1_v = self.volt_lin_final2(residual_1_v)
 
-    def generate_square_subsequent_mask(self, sz):
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return mask
+        residual_1_t = F.gelu(self.temp_lin_final1(residual_1))
+        residual_1_t = self.temp_lin_final2(residual_1_t)
+        
+        residual_1_v_mu = F.gelu(self.volt_lin_esti_1_mu(residual_1_v))
+        residual_1_v_mu = self.volt_lin_esti_1_mu_trans(residual_1_v_mu)
+        residual_1_v_mu = F.gelu(self.volt_lin_esti_2_mu(residual_1_v_mu))
+        residual_1_v_mu = self.volt_lin_esti_2_mu_trans(residual_1_v_mu)
+        residual_1_v_mu = self.volt_lin_esti_3_mu(residual_1_v_mu)
 
-# Initialize and load the Transformer model
-print("Loading battery forecasting model...")
-model = v9_rescaling_adaptive_TransformerModel3Decoder(
-    input_dim=3+1,
-    hidden_dim=150,
-    output_dim=2,
-    nhead=20,
-    num_layers=1,
-    dropout=0.1
+        residual_1_v_sigma = F.gelu(self.volt_lin_esti_1_sigma(residual_1_v))
+        residual_1_v_sigma = self.volt_lin_esti_1_sigma_trans(residual_1_v_sigma)
+        residual_1_v_sigma = F.gelu(self.volt_lin_esti_2_sigma(residual_1_v_sigma))
+        residual_1_v_sigma = self.volt_lin_esti_2_sigma_trans(residual_1_v_sigma)
+        residual_1_v_sigma = self.volt_lin_esti_3_sigma(residual_1_v_sigma)
+
+        residual_1_t_mu = F.gelu(self.temp_lin_esti_1_mu(residual_1_t))
+        residual_1_t_mu = self.temp_lin_esti_1_mu_trans(residual_1_t_mu)
+        residual_1_t_mu = F.gelu(self.temp_lin_esti_2_mu(residual_1_t_mu))
+        residual_1_t_mu = self.temp_lin_esti_2_mu_trans(residual_1_t_mu)
+        residual_1_t_mu = self.temp_lin_esti_3_mu(residual_1_t_mu)
+
+        residual_1_t_sigma = F.gelu(self.temp_lin_esti_1_sigma(residual_1_t))
+        residual_1_t_sigma = self.temp_lin_esti_1_sigma_trans(residual_1_t_sigma)
+        residual_1_t_sigma = F.gelu(self.temp_lin_esti_2_sigma(residual_1_t_sigma))
+        residual_1_t_sigma = self.temp_lin_esti_2_sigma_trans(residual_1_t_sigma)
+        residual_1_t_sigma = self.temp_lin_esti_3_sigma(residual_1_t_sigma)
+
+        voltage_mu_prediction = residual_1_v_mu.squeeze(dim=-1)  # [batch, seq, 1] -> [batch, seq]
+        voltage_error_prediction = torch.exp(residual_1_v_sigma.squeeze(dim=-1))
+        voltage_error_prediction = torch.clamp(voltage_error_prediction, min=0, max=50)
+
+        temp_mu_prediction = residual_1_t_mu.squeeze(dim=-1)
+        temp_error_prediction = torch.exp(residual_1_t_sigma.squeeze(dim=-1))
+        temp_error_prediction = torch.clamp(temp_error_prediction, min=0, max=50)
+        
+        repeated_original_initial_state = original_initial_state.unsqueeze(1).repeat(1, action.size(1), 1)
+        repeated_original_voltage = repeated_original_initial_state[:, :, 1]
+        repeated_original_temperature = repeated_original_initial_state[:, :, 2]
+
+        predicted_states_voltage = repeated_original_voltage + voltage_mu_prediction
+        predicted_states_temperature = repeated_original_temperature + temp_mu_prediction
+        
+        predicted_mu_sigma_final = torch.stack((predicted_states_voltage, predicted_states_temperature,
+                                                voltage_error_prediction, temp_error_prediction), dim=2)
+        return predicted_mu_sigma_final
+
+# Initialize and load the MoE-Enhanced Transformer model
+print("Loading MoE-Enhanced Digital Twin model...")
+model = Digital_Twin_v1(
+    initial_state_dim=3,  # [relative_age, voltage, temperature]
+    action_max_length=150,
+    output_state_dim=2,  # [voltage, temperature]
+    pos_encoding_dims=3,
+    hidden_dim=64,
+    c2nr=1
 )
 
-# Load Transformer model weights
+# Load MoE Transformer model weights
 import os
 script_dir = os.path.dirname(os.path.abspath(__file__))
 try:
-    saved_model_path = os.path.join(script_dir, '..', 'models', 'simulator_cpu.pth')
-    model_state_dict = torch.load(saved_model_path, map_location=torch.device('cpu'))
-    model.load_state_dict(model_state_dict)
+    saved_model_path = os.path.join(script_dir, '..', 'Digital_Twin', 'digital_twin_best.pt')
+    checkpoint = torch.load(saved_model_path, map_location=torch.device('cpu'))
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
-    print("Transformer model loaded successfully!")
+    print("MoE-Enhanced Transformer loaded successfully from Digital_Twin/digital_twin_best.pt!")
 except Exception as e:
-    print(f"Warning: Could not load Transformer model weights: {e}")
+    print(f"Warning: Could not load MoE Transformer model weights: {e}")
     print("Using untrained model for demonstration purposes.")
     model.eval()
 
@@ -338,6 +455,127 @@ def predict_ensemble():
                 'initial_voltage': voltage,
                 'initial_temperature': temperature,
                 'steps': steps
+            }
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
+
+@app.route('/compare_with_dataset', methods=['POST'])
+def compare_with_dataset():
+    try:
+        import pandas as pd
+        data = request.json
+        
+        # Get parameters
+        start_index = int(data.get('start_index', 10000))
+        sequence_length = int(data.get('sequence_length', 75))
+        
+        # Load segment from KIT dataset
+        dataset_path = os.path.join(script_dir, '..', 'data', 'cell_log_age_2s_P065_1_S01_C03', 'cell_log_age_2s_P065_1_S01_C03.csv')
+        
+        if not os.path.exists(dataset_path):
+            return jsonify({
+                'status': 'error',
+                'message': f'Dataset not found at {dataset_path}'
+            }), 404
+        
+        # Read the specific segment
+        df = pd.read_csv(dataset_path, sep=';', skiprows=range(1, start_index), nrows=sequence_length+1)
+        
+        # Extract data
+        initial_row = df.iloc[0]
+        initial_voltage = float(initial_row['v_raw_V'])
+        initial_temp = float(initial_row['t_cell_degC'])
+        current_profile = df['i_raw_A'].values[1:sequence_length+1].tolist()
+        
+        # Actual values
+        voltage_actual = df['v_raw_V'].values[1:sequence_length+1].tolist()
+        temp_actual = df['t_cell_degC'].values[1:sequence_length+1].tolist()
+        
+        # Estimate SOH
+        relative_age = 0.35
+        soh = 1.0 - relative_age
+        
+        # Prepare inputs for models
+        steps = len(current_profile)
+        initial_state_moe = torch.tensor([[relative_age, initial_voltage, initial_temp]], dtype=torch.float32)
+        actions = torch.tensor([current_profile], dtype=torch.float32).unsqueeze(-1)
+        
+        # Run MoE Transformer
+        with torch.no_grad():
+            moe_predictions = model(initial_state_moe, actions)
+        moe_voltage_forecast = moe_predictions[0, :, 0].cpu().numpy().tolist()
+        moe_temp_forecast = moe_predictions[0, :, 1].cpu().numpy().tolist()
+        
+        # Run Deep Ensemble
+        voltage_predictions_all = [[] for _ in range(10)]
+        temp_predictions_all = [[] for _ in range(10)]
+        
+        current_voltage = initial_voltage
+        current_temp = initial_temp
+        current_age = relative_age
+        current_i = 0.0
+        
+        for step in range(steps):
+            next_current = current_profile[step]
+            initial_state_ens = torch.tensor([[current_age, current_voltage, current_temp, current_i]], dtype=torch.float32)
+            action_ens = torch.tensor([[next_current]], dtype=torch.float32)
+            
+            with torch.no_grad():
+                predictions_ens = ensemble_model(initial_state_ens, action_ens)
+            
+            for m in range(10):
+                pred_voltage = predictions_ens[m, 0, 0].item()
+                pred_temp = predictions_ens[m, 0, 1].item()
+                voltage_predictions_all[m].append(pred_voltage)
+                temp_predictions_all[m].append(pred_temp)
+            
+            median_voltage = np.median([voltage_predictions_all[m][step] for m in range(10)])
+            median_temp = np.median([temp_predictions_all[m][step] for m in range(10)])
+            median_voltage = np.clip(median_voltage, 2.4, 4.2)
+            current_voltage = median_voltage
+            current_temp = median_temp
+            current_i = next_current
+        
+        ensemble_voltage_forecast = [np.median([voltage_predictions_all[m][step] for m in range(10)]) for step in range(steps)]
+        ensemble_temp_forecast = [np.median([temp_predictions_all[m][step] for m in range(10)]) for step in range(steps)]
+        
+        # Calculate errors
+        moe_voltage_mape = np.mean(np.abs((np.array(voltage_actual) - np.array(moe_voltage_forecast)) / np.array(voltage_actual))) * 100
+        ensemble_voltage_mape = np.mean(np.abs((np.array(voltage_actual) - np.array(ensemble_voltage_forecast)) / np.array(voltage_actual))) * 100
+        moe_temp_mae = np.mean(np.abs(np.array(temp_actual) - np.array(moe_temp_forecast)))
+        ensemble_temp_mae = np.mean(np.abs(np.array(temp_actual) - np.array(ensemble_temp_forecast)))
+        
+        return jsonify({
+            'status': 'success',
+            'actual': {
+                'voltage': voltage_actual,
+                'temperature': temp_actual
+            },
+            'moe': {
+                'voltage': moe_voltage_forecast,
+                'temperature': moe_temp_forecast,
+                'voltage_mape': float(moe_voltage_mape),
+                'temp_mae': float(moe_temp_mae)
+            },
+            'ensemble': {
+                'voltage': ensemble_voltage_forecast,
+                'temperature': ensemble_temp_forecast,
+                'voltage_mape': float(ensemble_voltage_mape),
+                'temp_mae': float(ensemble_temp_mae)
+            },
+            'parameters': {
+                'start_index': start_index,
+                'sequence_length': steps,
+                'initial_voltage': initial_voltage,
+                'initial_temperature': initial_temp,
+                'soh': soh
             }
         })
         

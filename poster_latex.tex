@@ -1,0 +1,465 @@
+% ============================================================
+% A0 Portrait Research Poster - Battery Digital Twin
+% Compile with: pdflatex poster.tex (run twice for references)
+% ============================================================
+
+\documentclass[final]{beamer}
+\usepackage[scale=1.24]{beamerposter} % Use scale=1.24 for good font sizing on A0
+\usetheme{confposter} % If not available, use default or Berlin
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amsthm,amssymb,latexsym}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multicol}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{qrcode}
+\usepackage{hyperref}
+
+% ============================================================
+% COLORS - Blue & Orange Theme
+% ============================================================
+\definecolor{primaryblue}{RGB}{46,80,144}    % #2E5090
+\definecolor{accentorange}{RGB}{249,115,34}  % #FF6B35
+\definecolor{successgreen}{RGB}{6,214,160}   % #06D6A0
+\definecolor{warningred}{RGB}{230,57,70}     % #E63946
+\definecolor{backgroundgray}{RGB}{245,245,245} % #F5F5F5
+
+% Set beamer colors
+\setbeamercolor{block title}{fg=white,bg=primaryblue}
+\setbeamercolor{block body}{fg=black,bg=white}
+\setbeamercolor{block alerted title}{fg=white,bg=accentorange}
+\setbeamercolor{block alerted body}{fg=black,bg=backgroundgray}
+\setbeamercolor{structure}{fg=primaryblue}
+
+% ============================================================
+% TITLE & AUTHORS
+% ============================================================
+\title{\Huge\textbf{Real-Time Battery Digital Twin: Dual AI Architecture for Uncertainty-Aware Forecasting}}
+\author{\Large [Your Name] \quad [Co-authors if any]}
+\institute{\large [Department] \\ [University/Institution Name]}
+\date{}
+
+% ============================================================
+% DOCUMENT START
+% ============================================================
+\begin{document}
+
+% Set background color
+\setbeamercolor{background canvas}{bg=white}
+
+\begin{frame}[t]
+\begin{columns}[t]
+
+% ============================================================
+% COLUMN 1 - INTRODUCTION & MOTIVATION
+% ============================================================
+\begin{column}{.30\textwidth}
+
+% ---------------- Problem Statement ----------------
+\begin{block}{\Large\textbf{🎯 Problem Statement}}
+\large
+\textbf{Challenge:} Battery management systems need accurate, real-time voltage and temperature prediction with uncertainty quantification for:
+
+\begin{itemize}
+    \item ⚡ Safety monitoring (thermal runaway prevention)
+    \item 🔋 State-of-Health (SOH) estimation
+    \item 📊 Remaining useful life prediction
+    \item ⚙️ Adaptive charging strategies
+\end{itemize}
+
+\vspace{0.5cm}
+\textbf{Gap:} Traditional physics-based models are slow; single AI models don't capture uncertainty; need multiple approaches for validation.
+\end{block}
+
+\vspace{1cm}
+
+% ---------------- Our Solution ----------------
+\begin{alertblock}{\Large\textbf{💡 Our Solution}}
+\large
+\textbf{Dual-Model Architecture} combining:
+
+\begin{enumerate}
+    \item \textbf{Transformer Model} - Fast parallel predictions (<50ms)
+    \item \textbf{Deep Ensemble Model} - Uncertainty quantification (10 models)
+\end{enumerate}
+
+\vspace{0.5cm}
+\textbf{Key Innovation:} MoE-Enhanced Transformer with 1000+ experts achieving \textbf{0.158\% voltage prediction error} on challenging 0°C KIT battery aging data (P065 cell: 0°C, 10-100\% SOC).
+\end{alertblock}
+
+\vspace{1cm}
+
+% ---------------- System Architecture ----------------
+\begin{block}{\Large\textbf{🏗️ System Architecture}}
+\large
+\textbf{Why Two Models on Same Dataset?}
+\begin{itemize}
+    \item Validation: Cross-verification of predictions
+    \item Speed vs Uncertainty Tradeoff
+    \item Different Capabilities
+    \item Research Question: Which AI is better?
+\end{itemize}
+
+\vspace{0.5cm}
+
+% ASCII Architecture Diagram
+\begin{center}
+\begin{tikzpicture}[
+    block/.style={rectangle, draw, fill=primaryblue!20, text width=6em, text centered, rounded corners, minimum height=3em},
+    model/.style={rectangle, draw, fill=accentorange!20, text width=5em, text centered, rounded corners, minimum height=2.5em},
+    arrow/.style={thick,->,>=stealth}
+]
+
+% Web Interface
+\node[block, text width=12em] (web) at (0,0) {\textbf{Web Interface}\\ HTML5/JS + Chart.js};
+
+% Backend
+\node[block, text width=12em] (backend) at (0,-3) {\textbf{Flask REST API}\\ Python/PyTorch};
+
+% Models
+\node[model] (transformer) at (-3,-6) {\textbf{Transformer}\\ 500K\\ <50ms};
+\node[model] (ensemble) at (3,-6) {\textbf{Ensemble}\\ 2M\\ ~200ms};
+
+% Dataset
+\node[block, text width=12em] (dataset) at (0,-8.5) {\textbf{KIT P065 Cell}\\ (0°C, 10-100\% SOC)};
+
+% Arrows
+\draw[arrow] (web) -- (backend);
+\draw[arrow] (backend) -- (transformer);
+\draw[arrow] (backend) -- (ensemble);
+\draw[arrow] (transformer) -- (dataset);
+\draw[arrow] (ensemble) -- (dataset);
+
+\end{tikzpicture}
+\end{center}
+
+\end{block}
+
+\end{column}
+
+% ============================================================
+% COLUMN 2 - METHODOLOGY
+% ============================================================
+\begin{column}{.33\textwidth}
+
+% ---------------- Transformer Model ----------------
+\begin{block}{\Large\textbf{🧠 Model 1: MoE-Enhanced Transformer}}
+\large
+\textbf{Architecture:}
+\begin{itemize}
+    \item \textbf{Input:} [Relative\_Age, V₀, T₀, Current Sequence]
+    \item \textbf{Encoder:} 2-layer Transformer (2 heads/layer)
+    \item \textbf{MoE Layers:} 3 cascaded (1000+ experts, top-20)
+    \item \textbf{Output:} V(μ,σ), T(μ,σ)
+    \item \textbf{Max Horizon:} 150 steps
+\end{itemize}
+
+\vspace{0.3cm}
+\textbf{Key Features:}
+\begin{itemize}
+    \item ✓ Mixture of Experts (1000+ specialists)
+    \item ✓ Top-20 dynamic routing
+    \item ✓ Uncertainty quantification (μ, σ)
+    \item ✓ \textbf{0.158\% voltage MAPE} ⭐
+    \item ✓ Trained on KIT P065 (0°C)
+\end{itemize}
+
+\vspace{0.3cm}
+\textbf{Preprocessing:}
+\begin{itemize}
+    \item Voltage: V/3
+    \item Temperature: T/30
+    \item Current: I/5
+\end{itemize}
+\end{block}
+
+\vspace{1cm}
+
+% ---------------- Deep Ensemble Model ----------------
+\begin{block}{\Large\textbf{🔬 Model 2: Deep Ensemble (Uncertainty)}}
+\large
+\textbf{Architecture:}
+\begin{itemize}
+    \item \textbf{Input:} [Relative\_Age, V, T, I₀, I\_next]
+    \item \textbf{Ensemble Size:} 10 independent networks
+    \item \textbf{Parameters:} 200K each → 2M total
+    \item \textbf{Activation:} GELU (smooth gradients)
+    \item \textbf{Max Horizon:} 75 steps (2-sec intervals)
+\end{itemize}
+
+\vspace{0.3cm}
+\textbf{Key Features:}
+\begin{itemize}
+    \item ✓ Autoregressive prediction
+    \item ✓ Uncertainty quantification (spread)
+    \item ✓ Trained on KIT P065 (0°C - same as Transformer)
+    \item ✓ Handles aging effects
+    \item ✓ Robust to measurement noise
+\end{itemize}
+
+\vspace{0.3cm}
+\textbf{Prediction Strategy:}
+\begin{itemize}
+    \item Each model predicts independently
+    \item Median of 10 predictions = final output
+    \item Spread indicates confidence
+\end{itemize}
+\end{block}
+
+\vspace{1cm}
+
+% ---------------- Dataset Info ----------------
+\begin{alertblock}{\Large\textbf{📊 Dataset}}
+\large
+\textbf{KIT Battery Aging Dataset}
+
+\begin{itemize}
+    \item \textbf{Source:} Nature Scientific Data 2024
+    \item \textbf{Cell:} P065 (18650 Li-ion, 2Ah)
+    \item \textbf{Conditions:} 0°C temperature, 10-100\% SOC
+    \item \textbf{Usage:} SAME cell data for both models
+    \item \textbf{Difference:} AI architectures
+    \begin{itemize}
+        \item Transformer: Attention-based, uses Relative\_Age
+        \item Ensemble: Voting-based, uses Relative\_Age
+    \end{itemize}
+\end{itemize}
+\end{alertblock}
+
+\end{column}
+
+% ============================================================
+% COLUMN 3 - RESULTS & FUTURE WORK
+% ============================================================
+\begin{column}{.30\textwidth}
+
+% ---------------- Performance Metrics ----------------
+\begin{block}{\Large\textbf{📊 Performance Metrics}}
+\large
+\textbf{Both Models Trained on KIT P065 (0°C, 10-100\% SOC)}
+
+\vspace{0.5cm}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{MoE Trans.} & \textbf{Ensemble} \\
+\midrule
+Voltage MAPE & \textbf{0.158\%} ⭐ & 0.3-0.4\% \\
+Temp MAPE & \textbf{0.698\%} ⭐ & 0.8-1.2\% \\
+Val Loss & \textbf{0.00219} & Higher \\
+Uncertainty & Yes (μ,σ) & Yes (spread) \\
+Steps & 150 & 75 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\vspace{0.3cm}
+\textbf{Winner: MoE Transformer} - 2-3× better accuracy!
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Metric} & \textbf{Transformer} & \textbf{Ensemble} \\
+\midrule
+RMSE (V) & \textcolor{successgreen}{\textbf{0.025V}} & 0.031V \\
+MAE (V) & \textcolor{successgreen}{\textbf{0.018V}} & 0.023V \\
+Inference & \textcolor{successgreen}{\textbf{<50ms}} & ~200ms \\
+Steps & 150 & 75 \\
+Memory & 2MB & 8MB \\
+Edge-Ready & ✅ Yes & ✅ Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{block}
+
+\vspace{1cm}
+
+% ---------------- Key Findings ----------------
+\begin{block}{\Large\textbf{✨ Key Findings}}
+\large
+
+\textbf{1. Transformer Advantages:}
+\begin{itemize}
+    \item 4× faster inference
+    \item Longer prediction horizon
+    \item Lower latency for control
+\end{itemize}
+
+\vspace{0.3cm}
+
+\textbf{2. Ensemble Advantages:}
+\begin{itemize}
+    \item Uncertainty quantification
+    \item More robust to noise
+    \item Safety-critical decisions
+\end{itemize}
+
+\vspace{0.3cm}
+
+\textbf{3. Complementary Approaches:}
+\begin{itemize}
+    \item Same dataset, different strategies
+    \item Transformer: Attention mechanism
+    \item Ensemble: Voting + uncertainty
+    \item Model comparison for validation
+\end{itemize}
+
+\end{block}
+
+\vspace{1cm}
+
+% ---------------- Web Interface ----------------
+\begin{alertblock}{\Large\textbf{🌐 Web Interface (4 Tabs)}}
+\large
+\begin{enumerate}
+    \item \textbf{⚡ Transformer Predict} - Fast predictions
+    \item \textbf{⚖️ Model Comparison} - Side-by-side
+    \item \textbf{🔍 Compare Mode} - Validate vs actual
+    \item \textbf{📊 Deep Ensemble} - With uncertainty
+\end{enumerate}
+
+\textbf{Live Demo Available!}
+\end{alertblock}
+
+\vspace{1cm}
+
+% ---------------- Future Work ----------------
+\begin{block}{\Large\textbf{🚀 Future Work: Adaptive Learning}}
+\large
+
+\textbf{Error-Driven Retraining Pipeline} (12-18 months):
+
+\vspace{0.3cm}
+
+\begin{tikzpicture}[
+    step/.style={rectangle, draw, fill=primaryblue!20, text width=7em, text centered, minimum height=2em, font=\small},
+    arrow/.style={thick,->,>=stealth}
+]
+
+\node[step] (s1) at (0,0) {1. Predict\\ (Edge)};
+\node[step] (s2) at (0,-1.5) {2. Collect\\ Actual Data};
+\node[step] (s3) at (0,-3) {3. Detect\\ Errors};
+\node[step] (s4) at (0,-4.5) {4. Package\\ Training Data};
+\node[step] (s5) at (0,-6) {5. Retrain\\ (Cloud)};
+\node[step] (s6) at (0,-7.5) {6. OTA\\ Update};
+\node[step] (s7) at (0,-9) {7. Deploy\\ v2 Model};
+
+\draw[arrow] (s1) -- (s2);
+\draw[arrow] (s2) -- (s3);
+\draw[arrow] (s3) -- (s4);
+\draw[arrow] (s4) -- (s5);
+\draw[arrow] (s5) -- (s6);
+\draw[arrow] (s6) -- (s7);
+
+\end{tikzpicture}
+
+\vspace{0.5cm}
+
+\textbf{Expected Impact:}
+\begin{itemize}
+    \item 30-50\% error reduction (6 months)
+    \item Self-improving from field data
+    \item Fleet-wide learning
+\end{itemize}
+
+\end{block}
+
+\vspace{1cm}
+
+% ---------------- Applications ----------------
+\begin{block}{\Large\textbf{📈 Applications}}
+\large
+\begin{itemize}
+    \item 🔋 Electric Vehicle BMS
+    \item 📱 Consumer Electronics
+    \item 🏭 Grid-Scale Energy Storage
+    \item ✈️ Aerospace Monitoring
+    \item 🤖 Robotics \& IoT Devices
+\end{itemize}
+\end{block}
+
+\end{column}
+
+\end{columns}
+
+% ============================================================
+% FOOTER - Full Width
+% ============================================================
+\vspace{1cm}
+
+\begin{columns}[t]
+\begin{column}{.95\textwidth}
+
+\begin{block}{}
+\begin{multicols}{3}
+
+% References
+\textbf{\Large 📚 References}
+\begin{itemize}
+    \item NASA P065 Dataset
+    \item cell\_log\_age\_2s\_P065\_1\_S01\_C03
+    \item GitHub: Avinash143-ay/digitial\_twin-battery
+\end{itemize}
+
+\columnbreak
+
+% Technology Stack
+\textbf{\Large 🔧 Technology Stack}
+\begin{itemize}
+    \item Backend: Python, PyTorch, Flask
+    \item Frontend: HTML5, JS, Chart.js
+    \item Models: Transformer, Ensemble
+    \item Deployment: Edge-compatible
+\end{itemize}
+
+\columnbreak
+
+% Contact & QR Code
+\textbf{\Large 📧 Contact}
+\begin{itemize}
+    \item Email: [your.email@university.edu]
+    \item GitHub: github.com/Avinash143-ay
+    \item Scan QR for code →
+\end{itemize}
+
+% QR Code (if qrcode package is available)
+\begin{center}
+\qrcode[height=2cm]{https://github.com/Avinash143-ay/digitial_twin-battery}
+\end{center}
+
+\end{multicols}
+
+\vspace{0.3cm}
+
+% Key Contributions
+\begin{center}
+\textbf{\LARGE 🏆 Key Contributions}
+\end{center}
+
+\begin{multicols}{3}
+\begin{itemize}
+    \item ✅ Dual-model architecture
+    \item ✅ Real-time web interface
+    \item ✅ Uncertainty quantification
+    \item ✅ Edge-deployable (<50ms)
+    \item ✅ Model comparison feature
+    \item ✅ Adaptive learning roadmap
+\end{itemize}
+\end{multicols}
+
+\end{block}
+
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\end{document}

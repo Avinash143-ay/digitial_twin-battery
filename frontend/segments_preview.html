@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saved Segments - Quick Preview</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #718096;
+            margin-bottom: 40px;
+            font-size: 1.2em;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 15px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            font-size: 1em;
+            opacity: 0.9;
+        }
+        
+        .segments-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 25px;
+            margin-top: 30px;
+        }
+        
+        .segment-card {
+            background: #f7fafc;
+            border: 2px solid #e2e8f0;
+            border-radius: 15px;
+            padding: 25px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .segment-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+            border-color: #667eea;
+        }
+        
+        .segment-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .segment-index {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2d3748;
+        }
+        
+        .winner-badge {
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+        
+        .metrics {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .metric-label {
+            color: #4a5568;
+            font-size: 0.9em;
+        }
+        
+        .metric-value {
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+        
+        .moe-value {
+            color: #48bb78;
+        }
+        
+        .ensemble-value {
+            color: #3b82f6;
+        }
+        
+        .gap-value {
+            color: #f56565;
+        }
+        
+        .load-btn {
+            margin-top: 20px;
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .load-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .voltage-info {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e2e8f0;
+            font-size: 0.85em;
+            color: #718096;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Saved Demonstration Segments</h1>
+        <p class="subtitle">Pre-computed predictions ready for your presentation</p>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="totalSegments">-</div>
+                <div class="stat-label">Segments Scanned</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="goodSegments">-</div>
+                <div class="stat-label">Demo-Ready Segments</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="winRate">-</div>
+                <div class="stat-label">MoE Win Rate</div>
+            </div>
+        </div>
+        
+        <div class="segments-grid" id="segmentsGrid">
+            <!-- Segments will be loaded here -->
+        </div>
+    </div>
+    
+    <script>
+        // Load segment summary
+        fetch('saved_predictions/segment_summary.json')
+            .then(response => response.json())
+            .then(data => {
+                // Update stats
+                document.getElementById('totalSegments').textContent = data.total_segments;
+                document.getElementById('goodSegments').textContent = data.good_segments;
+                document.getElementById('winRate').textContent = (data.moe_win_rate * 100).toFixed(1) + '%';
+                
+                // Display top segments
+                const grid = document.getElementById('segmentsGrid');
+                
+                // Sort by gap to show most dramatic wins first
+                data.all_results.sort((a, b) => b.voltage_gap - a.voltage_gap);
+                
+                // Display only segments where MoE wins
+                data.all_results
+                    .filter(seg => seg.moe_wins)
+                    .slice(0, 10)  // Top 10
+                    .forEach((seg, idx) => {
+                        const card = document.createElement('div');
+                        card.className = 'segment-card';
+                        card.onclick = () => loadSegment(seg.start_index);
+                        
+                        const improvement = ((seg.ensemble_voltage_mape / seg.moe_voltage_mape) - 1) * 100;
+                        
+                        card.innerHTML = `
+                            <div class="segment-header">
+                                <div class="segment-index">#${idx + 1} - Index ${seg.start_index}</div>
+                                <div class="winner-badge">MoE Wins!</div>
+                            </div>
+                            
+                            <div class="metrics">
+                                <div class="metric-row">
+                                    <span class="metric-label">MoE MAPE:</span>
+                                    <span class="metric-value moe-value">${seg.moe_voltage_mape.toFixed(3)}%</span>
+                                </div>
+                                <div class="metric-row">
+                                    <span class="metric-label">Ensemble MAPE:</span>
+                                    <span class="metric-value ensemble-value">${seg.ensemble_voltage_mape.toFixed(3)}%</span>
+                                </div>
+                                <div class="metric-row">
+                                    <span class="metric-label">Gap:</span>
+                                    <span class="metric-value gap-value">${seg.voltage_gap.toFixed(3)}%</span>
+                                </div>
+                                <div class="metric-row">
+                                    <span class="metric-label">Improvement:</span>
+                                    <span class="metric-value" style="color: #805ad5;">${improvement.toFixed(0)}%</span>
+                                </div>
+                            </div>
+                            
+                            <div class="voltage-info">
+                                ⚡ Voltage: ${seg.voltage_mean.toFixed(3)}V ± ${seg.voltage_std.toFixed(4)}V<br>
+                                🌡️ Temp MAE: MoE ${seg.moe_temp_mae.toFixed(3)}°C vs Ens ${seg.ensemble_temp_mae.toFixed(3)}°C
+                            </div>
+                            
+                            <button class="load-btn">
+                                📊 Load in Dashboard
+                            </button>
+                        `;
+                        
+                        grid.appendChild(card);
+                    });
+            })
+            .catch(err => {
+                console.error('Error loading summary:', err);
+                alert('Could not load segment summary. Make sure saved_predictions/segment_summary.json exists.');
+            });
+        
+        function loadSegment(index) {
+            // Open main dashboard with this index pre-filled
+            const url = 'index.html?tab=datasetCompare&index=' + index;
+            window.location.href = url;
+        }
+    </script>
+</body>
+</html>
