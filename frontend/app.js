@@ -20,6 +20,15 @@ const requiredHeaders = [
   "temperature_median_pred",
 ];
 
+const isLocalHost =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+const isFileProtocol = window.location.protocol === "file:";
+
+// When opened directly as file://, API calls need an explicit backend base URL.
+const API_BASE = isLocalHost || isFileProtocol ? "http://localhost:5000" : "";
+
+const apiUrl = (path) => `${API_BASE}${path}`;
+
 // Separate chart instances for each tab
 let predictVoltageChart;
 let predictTemperatureChart;
@@ -140,7 +149,7 @@ const predictBatteryBehavior = async () => {
 
   try {
     // Call Python backend API
-    const response = await fetch('http://localhost:5000/predict', {
+    const response = await fetch(apiUrl('/predict'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -197,6 +206,38 @@ const predictBatteryBehavior = async () => {
 
 predictBtn.addEventListener("click", predictBatteryBehavior);
 
+const parseCsvLine = (line, delimiter) => {
+  const cells = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+
+    if (ch === '"') {
+      // Handle escaped quotes "" inside quoted fields.
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === delimiter && !inQuotes) {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  cells.push(current.trim());
+  return cells;
+};
+
 const parseCsv = (text) => {
   const lines = text
     .split(/\r?\n/)
@@ -207,8 +248,15 @@ const parseCsv = (text) => {
     return { headers: [], rows: [] };
   }
 
-  const headers = lines[0].split(",").map((h) => h.trim());
-  const rows = lines.slice(1).map((line) => line.split(",").map((cell) => cell.trim()));
+  const headerLine = lines[0];
+  const commaCount = (headerLine.match(/,/g) || []).length;
+  const semicolonCount = (headerLine.match(/;/g) || []).length;
+  const delimiter = semicolonCount > commaCount ? ';' : ',';
+
+  const headers = parseCsvLine(headerLine, delimiter).map((h) => h.trim().replace(/^"|"$/g, ""));
+  const rows = lines
+    .slice(1)
+    .map((line) => parseCsvLine(line, delimiter).map((cell) => cell.trim().replace(/^"|"$/g, "")));
 
   return { headers, rows };
 };
@@ -645,6 +693,515 @@ document.getElementById("compareDownloadTemperature").addEventListener("click", 
 });
 
 // ================================
+// ADAPTIVE TUNING (COMPARE TAB)
+// ================================
+
+const adaptiveRequiredHeaders = ["current", "voltage_actual", "temperature_actual"];
+let adaptiveData = null;
+let adaptiveRetrainPayload = null;
+let adaptiveTrainingPoll = null;
+
+const adaptiveActualInput = document.getElementById("adaptiveActualInput");
+const adaptiveFileInfo = document.getElementById("adaptiveFileInfo");
+const adaptiveEvaluateBtn = document.getElementById("adaptiveEvaluateBtn");
+const adaptiveQueueBtn = document.getElementById("adaptiveQueueBtn");
+const adaptiveEvalStatus = document.getElementById("adaptiveEvalStatus");
+const adaptiveTrainMoeBtn = document.getElementById("adaptiveTrainMoeBtn");
+const adaptiveTrainEnsembleBtn = document.getElementById("adaptiveTrainEnsembleBtn");
+const adaptiveTrainingStatus = document.getElementById("adaptiveTrainingStatus");
+
+const setAdaptiveEvalStatus = (message, type = "") => {
+  adaptiveEvalStatus.textContent = message;
+  adaptiveEvalStatus.className = `adaptive-status${type ? ` ${type}` : ""}`;
+};
+
+const setAdaptiveTrainingStatus = (message, type = "") => {
+  adaptiveTrainingStatus.textContent = message;
+  adaptiveTrainingStatus.className = `training-status${type ? ` ${type}` : ""}`;
+};
+
+const setAdaptiveTrainButtons = (modelsToTrain = [], forceDisable = false) => {
+  if (forceDisable) {
+    adaptiveTrainMoeBtn.disabled = true;
+    adaptiveTrainEnsembleBtn.disabled = true;
+    return;
+  }
+  adaptiveTrainMoeBtn.disabled = !modelsToTrain.includes("moe");
+  adaptiveTrainEnsembleBtn.disabled = !modelsToTrain.includes("ensemble");
+};
+
+const formatAdaptiveLoss = (lossValue) => {
+  if (typeof lossValue === "number" && Number.isFinite(lossValue)) {
+    return lossValue.toFixed(6);
+  }
+  return "n/a";
+};
+
+const calculateMAPE = (actual, predicted) => {
+  const count = Math.min(actual.length, predicted.length);
+  if (!count) return NaN;
+  let total = 0;
+  for (let i = 0; i < count; i += 1) {
+    const denom = Math.max(Math.abs(actual[i]), 1e-6);
+    total += Math.abs((actual[i] - predicted[i]) / denom);
+  }
+  return (total / count) * 100;
+};
+
+const calculateMAE = (actual, predicted) => {
+  const count = Math.min(actual.length, predicted.length);
+  if (!count) return NaN;
+  let total = 0;
+  for (let i = 0; i < count; i += 1) {
+    total += Math.abs(actual[i] - predicted[i]);
+  }
+  return total / count;
+};
+
+const stopAdaptiveTrainingPoll = () => {
+  if (adaptiveTrainingPoll) {
+    clearInterval(adaptiveTrainingPoll);
+    adaptiveTrainingPoll = null;
+  }
+};
+
+const refreshAdaptiveTrainingStatus = async () => {
+  try {
+    const response = await fetch(apiUrl('/training_status'));
+    if (!response.ok) {
+      throw new Error("Unable to fetch training status");
+    }
+
+    const result = await response.json();
+    const training = result.training || {};
+
+    if (training.running) {
+      setAdaptiveTrainingStatus(
+        `Training ${String(training.model_name || "").toUpperCase()} (${training.tuning_mode || "full"})... ${training.processed_samples || 0}/${training.total_samples || 0} | loss: ${formatAdaptiveLoss(training.last_loss)}`,
+        "running"
+      );
+      setAdaptiveTrainButtons([], true);
+      return;
+    }
+
+    if (training.status === "completed") {
+      setAdaptiveTrainingStatus(
+        `Completed ${String(training.model_name || "").toUpperCase()} tuning. Loss: ${formatAdaptiveLoss(training.last_loss)}`,
+        "success"
+      );
+      stopAdaptiveTrainingPoll();
+      const models = adaptiveRetrainPayload?.models_to_train || [];
+      setAdaptiveTrainButtons(models);
+      return;
+    }
+
+    if (training.status === "failed") {
+      setAdaptiveTrainingStatus(`Training failed: ${training.error || training.message || "unknown error"}`, "error");
+      stopAdaptiveTrainingPoll();
+      const models = adaptiveRetrainPayload?.models_to_train || [];
+      setAdaptiveTrainButtons(models);
+      return;
+    }
+
+    setAdaptiveTrainingStatus(`Training status: ${training.message || "idle"}`);
+  } catch (error) {
+    setAdaptiveTrainingStatus(`Training status error: ${error.message}`, "error");
+    stopAdaptiveTrainingPoll();
+    const models = adaptiveRetrainPayload?.models_to_train || [];
+    setAdaptiveTrainButtons(models);
+  }
+};
+
+const startAdaptiveTrainingPoll = () => {
+  stopAdaptiveTrainingPoll();
+  adaptiveTrainingPoll = setInterval(refreshAdaptiveTrainingStatus, 2000);
+};
+
+const queueAdaptiveRetrainingSamples = async (triggeredBy = "manual") => {
+  if (!adaptiveRetrainPayload) {
+    updateStatus("Evaluate with actual data before queueing.", "ready");
+    return false;
+  }
+
+  if (adaptiveRetrainPayload.queued) {
+    return true;
+  }
+
+  adaptiveQueueBtn.disabled = true;
+  setAdaptiveTrainButtons([], true);
+
+  try {
+    const response = await fetch(apiUrl('/queue_retraining_sample'), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...adaptiveRetrainPayload,
+        triggered_by: triggeredBy
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to queue retraining samples");
+    }
+
+    const result = await response.json();
+    adaptiveRetrainPayload.queued = true;
+    const models = result.models_to_train || adaptiveRetrainPayload.models_to_train || [];
+    setAdaptiveTrainButtons(models);
+    setAdaptiveEvalStatus(`Queued for tuning: ${models.join(" + ").toUpperCase() || "NONE"}`, "ok");
+    updateStatus(result.message || "Queued retraining samples.", "complete");
+    return true;
+  } catch (error) {
+    updateStatus(`Error queueing samples: ${error.message}`, "ready");
+    setAdaptiveEvalStatus(`Queue failed: ${error.message}`, "alert");
+    adaptiveQueueBtn.disabled = false;
+    const models = adaptiveRetrainPayload?.models_to_train || [];
+    setAdaptiveTrainButtons(models);
+    return false;
+  }
+};
+
+const startAdaptiveTraining = async (modelName) => {
+  if (!adaptiveRetrainPayload) {
+    updateStatus("Evaluate with actual data before starting tuning.", "ready");
+    return;
+  }
+
+  if (!adaptiveRetrainPayload.models_to_train?.includes(modelName)) {
+    updateStatus(`${modelName.toUpperCase()} did not cross threshold for current sample.`, "ready");
+    return;
+  }
+
+  if (!adaptiveRetrainPayload.queued) {
+    const queued = await queueAdaptiveRetrainingSamples("manual_before_train");
+    if (!queued) return;
+  }
+
+  const epochs = parseInt(document.getElementById("adaptiveTrainEpochs").value, 10);
+  const maxSamples = parseInt(document.getElementById("adaptiveTrainMaxSamples").value, 10);
+
+  if (!Number.isFinite(epochs) || epochs < 1 || epochs > 20) {
+    updateStatus("Training epochs must be between 1 and 20.", "ready");
+    return;
+  }
+  if (!Number.isFinite(maxSamples) || maxSamples < 1 || maxSamples > 500) {
+    updateStatus("Max queued samples must be between 1 and 500.", "ready");
+    return;
+  }
+
+  try {
+    setAdaptiveTrainButtons([], true);
+    setAdaptiveTrainingStatus(`Starting ${modelName.toUpperCase()} tuning...`, "running");
+
+    const learningRate = modelName === "ensemble" ? 0.001 : 0.0001;
+
+    const body = {
+      model_name: modelName,
+      tuning_mode: modelName === "moe" ? "adapter" : "full",
+      epochs,
+      max_samples: maxSamples,
+      learning_rate: learningRate,
+      rank: 8,
+      alpha: 16,
+      dropout: 0.05,
+      batch_size: 4,
+      accumulation_steps: 2
+    };
+
+    const response = await fetch(apiUrl('/train_queued_model'), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    const result = await response.json();
+    if (!response.ok || (result.status !== "started" && result.status !== "success")) {
+      throw new Error(result.message || "Failed to start tuning");
+    }
+
+    updateStatus(result.message || `${modelName.toUpperCase()} tuning started.`, "live");
+    startAdaptiveTrainingPoll();
+    await refreshAdaptiveTrainingStatus();
+  } catch (error) {
+    updateStatus(`Training start error: ${error.message}`, "ready");
+    setAdaptiveTrainingStatus(`Training start failed: ${error.message}`, "error");
+    const models = adaptiveRetrainPayload?.models_to_train || [];
+    setAdaptiveTrainButtons(models);
+  }
+};
+
+const evaluateAdaptiveWithActualData = async () => {
+  if (!adaptiveData) {
+    updateStatus("Upload actual CSV first.", "ready");
+    return;
+  }
+
+  let soh = parseFloat(document.getElementById("adaptiveSOH").value);
+  let initialVoltage = parseFloat(document.getElementById("adaptiveInitialVoltage").value);
+  let initialTemperature = parseFloat(document.getElementById("adaptiveInitialTemperature").value);
+
+  if (!Number.isFinite(soh)) soh = 0.95;
+  if (!Number.isFinite(initialVoltage)) initialVoltage = adaptiveData.voltageActual[0];
+  if (!Number.isFinite(initialTemperature)) initialTemperature = adaptiveData.temperatureActual[0];
+
+  const steps = Math.min(adaptiveData.current.length, adaptiveData.voltageActual.length, adaptiveData.temperatureActual.length, 75);
+  const currentDataSliced = adaptiveData.current.slice(0, steps);
+  const actualVoltage = adaptiveData.voltageActual.slice(0, steps);
+  const actualTemperature = adaptiveData.temperatureActual.slice(0, steps);
+
+  const moeVoltageThreshold = parseFloat(document.getElementById("adaptiveMoeVoltageThreshold").value);
+  const moeTempThreshold = parseFloat(document.getElementById("adaptiveMoeTempThreshold").value);
+  const ensembleVoltageThreshold = parseFloat(document.getElementById("adaptiveEnsembleVoltageThreshold").value);
+  const ensembleTempThreshold = parseFloat(document.getElementById("adaptiveEnsembleTempThreshold").value);
+  const autoQueue = document.getElementById("adaptiveAutoQueue").checked;
+
+  adaptiveEvaluateBtn.disabled = true;
+  adaptiveQueueBtn.disabled = true;
+  setAdaptiveTrainButtons([], true);
+  setAdaptiveEvalStatus("Running model evaluation against actual data...");
+  setAdaptiveTrainingStatus("Training status: idle");
+
+  try {
+    const transformerResponse = await fetch(apiUrl('/predict'), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        soh,
+        voltage: initialVoltage,
+        temperature: initialTemperature,
+        current_data: currentDataSliced,
+        steps
+      })
+    });
+
+    if (!transformerResponse.ok) {
+      throw new Error("MoE prediction failed for adaptive evaluation");
+    }
+    const transformerResult = await transformerResponse.json();
+
+    const relativeAge = 1 - soh;
+    const ensembleResponse = await fetch(apiUrl('/predict_ensemble'), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        relative_age: relativeAge,
+        voltage: initialVoltage,
+        temperature: initialTemperature,
+        current_data: currentDataSliced,
+        steps
+      })
+    });
+
+    if (!ensembleResponse.ok) {
+      throw new Error("Ensemble prediction failed for adaptive evaluation");
+    }
+    const ensembleResult = await ensembleResponse.json();
+
+    const moeVoltage = transformerResult.voltage_forecast.slice(0, steps);
+    const moeTemperature = transformerResult.temperature_forecast.slice(0, steps);
+    const ensembleVoltage = ensembleResult.voltage_forecast.slice(0, steps);
+    const ensembleTemperature = ensembleResult.temperature_forecast.slice(0, steps);
+
+    const moeVoltageMAPE = calculateMAPE(actualVoltage, moeVoltage);
+    const moeTempMAE = calculateMAE(actualTemperature, moeTemperature);
+    const ensembleVoltageMAPE = calculateMAPE(actualVoltage, ensembleVoltage);
+    const ensembleTempMAE = calculateMAE(actualTemperature, ensembleTemperature);
+
+    const exceeded = {
+      moe: {
+        voltage_mape: moeVoltageMAPE > moeVoltageThreshold,
+        temp_mae: moeTempMAE > moeTempThreshold
+      },
+      ensemble: {
+        voltage_mape: ensembleVoltageMAPE > ensembleVoltageThreshold,
+        temp_mae: ensembleTempMAE > ensembleTempThreshold
+      }
+    };
+
+    const modelsToTrain = [];
+    if (exceeded.moe.voltage_mape || exceeded.moe.temp_mae) modelsToTrain.push("moe");
+    if (exceeded.ensemble.voltage_mape || exceeded.ensemble.temp_mae) modelsToTrain.push("ensemble");
+
+    adaptiveRetrainPayload = {
+      start_index: -1,
+      sequence_length: steps,
+      thresholds: {
+        moe: { voltage_mape: moeVoltageThreshold, temp_mae: moeTempThreshold },
+        ensemble: { voltage_mape: ensembleVoltageThreshold, temp_mae: ensembleTempThreshold }
+      },
+      metrics: {
+        moe_voltage_mape: moeVoltageMAPE,
+        moe_temp_mae: moeTempMAE,
+        ensemble_voltage_mape: ensembleVoltageMAPE,
+        ensemble_temp_mae: ensembleTempMAE
+      },
+      exceeded,
+      models_to_train: modelsToTrain,
+      parameters: {
+        sequence_length: steps,
+        soh,
+        relative_age: relativeAge,
+        initial_voltage: initialVoltage,
+        initial_temperature: initialTemperature,
+        current_profile: currentDataSliced,
+        source: "user_actual_csv"
+      },
+      actual: {
+        voltage: actualVoltage,
+        temperature: actualTemperature
+      },
+      moe: {
+        voltage: moeVoltage,
+        temperature: moeTemperature,
+        voltage_mape: moeVoltageMAPE,
+        temp_mae: moeTempMAE
+      },
+      ensemble: {
+        voltage: ensembleVoltage,
+        temperature: ensembleTemperature,
+        voltage_mape: ensembleVoltageMAPE,
+        temp_mae: ensembleTempMAE
+      },
+      queued: false
+    };
+
+    const labels = Array.from({ length: steps }, (_, idx) => `${idx}s`);
+
+    if (compareVoltageChart) compareVoltageChart.destroy();
+    if (compareTemperatureChart) compareTemperatureChart.destroy();
+
+    const compareVoltageCtx = document.getElementById("compareVoltageChart");
+    compareVoltageChart = new Chart(compareVoltageCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "⚫ Actual", data: actualVoltage, borderColor: "#000000", borderWidth: 3, tension: 0.1, pointRadius: 2 },
+          { label: "🟢 MoE", data: moeVoltage, borderColor: "#48bb78", borderWidth: 2, tension: 0.25, pointRadius: 1 },
+          { label: "🔵 Ensemble", data: ensembleVoltage, borderColor: "#3b82f6", borderWidth: 2, tension: 0.25, pointRadius: 1 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false } }
+    });
+
+    const compareTempCtx = document.getElementById("compareTemperatureChart");
+    compareTemperatureChart = new Chart(compareTempCtx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "⚫ Actual", data: actualTemperature, borderColor: "#000000", borderWidth: 3, tension: 0.1, pointRadius: 2 },
+          { label: "🟢 MoE", data: moeTemperature, borderColor: "#48bb78", borderWidth: 2, tension: 0.25, pointRadius: 1 },
+          { label: "🔵 Ensemble", data: ensembleTemperature, borderColor: "#3b82f6", borderWidth: 2, tension: 0.25, pointRadius: 1 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false } }
+    });
+
+    document.getElementById("compareVoltageSummary").textContent = `Actual vs Models: MoE ${moeVoltageMAPE.toFixed(3)}% | Ensemble ${ensembleVoltageMAPE.toFixed(3)}% (MAPE)`;
+    document.getElementById("compareTemperatureSummary").textContent = `Actual vs Models: MoE ${moeTempMAE.toFixed(3)}°C | Ensemble ${ensembleTempMAE.toFixed(3)}°C (MAE)`;
+    document.getElementById("compareDownloadVoltage").disabled = false;
+    document.getElementById("compareDownloadTemperature").disabled = false;
+
+    if (modelsToTrain.length > 0) {
+      const reasons = [];
+      if (exceeded.moe.voltage_mape) reasons.push(`MoE V MAPE ${moeVoltageMAPE.toFixed(3)}% > ${moeVoltageThreshold.toFixed(3)}%`);
+      if (exceeded.moe.temp_mae) reasons.push(`MoE T MAE ${moeTempMAE.toFixed(3)}°C > ${moeTempThreshold.toFixed(3)}°C`);
+      if (exceeded.ensemble.voltage_mape) reasons.push(`Ens V MAPE ${ensembleVoltageMAPE.toFixed(3)}% > ${ensembleVoltageThreshold.toFixed(3)}%`);
+      if (exceeded.ensemble.temp_mae) reasons.push(`Ens T MAE ${ensembleTempMAE.toFixed(3)}°C > ${ensembleTempThreshold.toFixed(3)}°C`);
+
+      setAdaptiveEvalStatus(`Threshold exceeded for ${modelsToTrain.join(" + ").toUpperCase()}: ${reasons.join(" | ")}`, "alert");
+      adaptiveQueueBtn.disabled = false;
+
+      if (autoQueue) {
+        const queued = await queueAdaptiveRetrainingSamples("automatic_threshold");
+        if (queued) {
+          setAdaptiveTrainButtons(modelsToTrain);
+        }
+      }
+    } else {
+      setAdaptiveEvalStatus("Threshold not exceeded for MoE or Ensemble.", "ok");
+      adaptiveQueueBtn.disabled = true;
+      setAdaptiveTrainButtons([]);
+    }
+
+    updateStatus(`Adaptive evaluation complete for ${steps} steps.`, "complete");
+  } catch (error) {
+    updateStatus(`Adaptive evaluation error: ${error.message}`, "ready");
+    setAdaptiveEvalStatus(`Evaluation failed: ${error.message}`, "alert");
+    setAdaptiveTrainButtons([]);
+    adaptiveQueueBtn.disabled = true;
+  } finally {
+    adaptiveEvaluateBtn.disabled = false;
+  }
+};
+
+adaptiveActualInput.addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  adaptiveData = null;
+  adaptiveRetrainPayload = null;
+  adaptiveQueueBtn.disabled = true;
+  setAdaptiveTrainButtons([], true);
+
+  if (!file) {
+    adaptiveFileInfo.classList.remove("show");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const text = String(e.target.result || "");
+    const { headers, rows } = parseCsv(text);
+    const missing = adaptiveRequiredHeaders.filter((h) => !headers.includes(h));
+    if (missing.length) {
+      setAdaptiveEvalStatus(`CSV missing columns: ${missing.join(", ")}`, "alert");
+      adaptiveFileInfo.classList.remove("show");
+      return;
+    }
+
+    const idx = getColumnIndexMap(headers);
+    const current = [];
+    const voltageActual = [];
+    const temperatureActual = [];
+
+    rows.forEach((row) => {
+      const c = toNumber(row[idx.current]);
+      const v = toNumber(row[idx.voltage_actual]);
+      const t = toNumber(row[idx.temperature_actual]);
+      if (c !== null && v !== null && t !== null) {
+        current.push(c);
+        voltageActual.push(v);
+        temperatureActual.push(t);
+      }
+    });
+
+    if (current.length < 2) {
+      setAdaptiveEvalStatus("CSV needs at least 2 valid rows.", "alert");
+      adaptiveFileInfo.classList.remove("show");
+      return;
+    }
+
+    adaptiveData = { current, voltageActual, temperatureActual };
+    adaptiveFileInfo.innerHTML = `✓ Loaded ${current.length} rows (current + actual voltage + actual temperature)`;
+    adaptiveFileInfo.classList.add("show");
+    setAdaptiveEvalStatus("Data loaded. Click Evaluate vs Actual.");
+    updateStatus(`Adaptive data loaded (${current.length} rows).`, "loaded");
+  };
+  reader.readAsText(file);
+});
+
+adaptiveEvaluateBtn.addEventListener("click", evaluateAdaptiveWithActualData);
+adaptiveQueueBtn.addEventListener("click", async () => {
+  await queueAdaptiveRetrainingSamples("manual");
+});
+adaptiveTrainMoeBtn.addEventListener("click", async () => {
+  await startAdaptiveTraining("moe");
+});
+adaptiveTrainEnsembleBtn.addEventListener("click", async () => {
+  await startAdaptiveTraining("ensemble");
+});
+
+// ================================
 // ENSEMBLE TAB FUNCTIONALITY
 // ================================
 
@@ -745,7 +1302,7 @@ const predictWithEnsemble = async () => {
 
   try {
     // Call Python backend API
-    const response = await fetch('http://localhost:5000/predict_ensemble', {
+    const response = await fetch(apiUrl('/predict_ensemble'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -920,7 +1477,7 @@ const compareModels = async () => {
   
   try {
     // Call Transformer model
-    const transformerResponse = await fetch('http://localhost:5000/predict', {
+    const transformerResponse = await fetch(apiUrl('/predict'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -937,7 +1494,7 @@ const compareModels = async () => {
     
     // Call DeepEnsemble model
     const relativeAge = 1 - soh;
-    const ensembleResponse = await fetch('http://localhost:5000/predict_ensemble', {
+    const ensembleResponse = await fetch(apiUrl('/predict_ensemble'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1106,25 +1663,69 @@ document.getElementById("mcDownloadTemperature").addEventListener("click", () =>
 // DATASET COMPARISON FUNCTIONALITY
 let datasetVoltageChart, datasetTemperatureChart;
 
+const getDatasetSplitInfo = async (sequenceLength, requestedStartIndex) => {
+  const response = await fetch(apiUrl('/dataset_split_info'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sequence_length: sequenceLength,
+      requested_start_index: requestedStartIndex
+    })
+  });
+
+  const result = await response.json();
+  if (!response.ok || result.status !== 'success') {
+    throw new Error(result.message || 'Failed to get dataset split info');
+  }
+
+  return result;
+};
+
+document.getElementById('datasetFindTestBtn').addEventListener('click', async () => {
+  const startIndexInput = document.getElementById('datasetStartIndex');
+  const seqInput = document.getElementById('datasetSequenceLength');
+
+  const requestedStartIndex = parseInt(startIndexInput.value, 10);
+  const sequenceLength = parseInt(seqInput.value, 10);
+
+  try {
+    updateStatus('Finding nearest valid test index...', 'loading');
+    const splitInfoResult = await getDatasetSplitInfo(sequenceLength, requestedStartIndex);
+    const split = splitInfoResult.split || {};
+    startIndexInput.value = split.suggested_test_start;
+    updateStatus(
+      `Valid test index selected: ${split.suggested_test_start} (test count: ${split.test_count})`,
+      'loaded'
+    );
+  } catch (error) {
+    updateStatus(`Error: ${error.message}`, 'ready');
+  }
+});
+
 document.getElementById("datasetCompareBtn").addEventListener("click", async () => {
-  const startIndex = parseInt(document.getElementById("datasetStartIndex").value);
-  const sequenceLength = parseInt(document.getElementById("datasetSequenceLength").value);
+  const startIndex = parseInt(document.getElementById("datasetStartIndex").value, 10);
+  const sequenceLength = parseInt(document.getElementById("datasetSequenceLength").value, 10);
+  const useTestSplit = document.getElementById('datasetUseTestSplit').checked;
   
   updateStatus(`Loading dataset segment from index ${startIndex}...`, "loading");
   document.getElementById("datasetCompareBtn").disabled = true;
+  document.getElementById('datasetFindTestBtn').disabled = true;
   
   try {
-    const response = await fetch('http://localhost:5000/compare_with_dataset', {
+    const response = await fetch(apiUrl('/compare_with_dataset'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         start_index: startIndex,
-        sequence_length: sequenceLength
+        sequence_length: sequenceLength,
+        use_test_split: useTestSplit
       })
     });
-    
-    if (!response.ok) throw new Error('Dataset comparison failed');
+
     const result = await response.json();
+    if (!response.ok || result.status !== 'success') {
+      throw new Error(result.message || 'Dataset comparison failed');
+    }
     
     // Extract data
     const labels = Array.from({ length: result.actual.voltage.length }, (_, idx) => `${idx}s`);
@@ -1262,22 +1863,36 @@ document.getElementById("datasetCompareBtn").addEventListener("click", async () 
     });
     
     // Update summaries
+    const splitMeta = result.data_split || {};
+    const resolvedIndex = splitMeta.resolved_start_index ?? startIndex;
+    const requestedIndex = splitMeta.requested_start_index ?? startIndex;
+    const usedSplitText = useTestSplit ? ' | test split mode' : '';
+
     document.getElementById("datasetVoltageSummary").textContent = 
-      `Segment from index ${startIndex}: MoE ${result.moe.voltage_mape.toFixed(3)}% vs Ensemble ${result.ensemble.voltage_mape.toFixed(3)}%`;
+      `Segment index ${resolvedIndex} (requested ${requestedIndex})${usedSplitText}: MoE ${result.moe.voltage_mape.toFixed(3)}% vs Ensemble ${result.ensemble.voltage_mape.toFixed(3)}%`;
     document.getElementById("datasetTemperatureSummary").textContent = 
-      `Segment from index ${startIndex}: MoE ${result.moe.temp_mae.toFixed(3)}°C vs Ensemble ${result.ensemble.temp_mae.toFixed(3)}°C`;
+      `Segment index ${resolvedIndex} (requested ${requestedIndex})${usedSplitText}: MoE ${result.moe.temp_mae.toFixed(3)}°C vs Ensemble ${result.ensemble.temp_mae.toFixed(3)}°C`;
+
+    if (useTestSplit && Number.isFinite(resolvedIndex)) {
+      document.getElementById('datasetStartIndex').value = resolvedIndex;
+    }
     
     // Enable download buttons
     document.getElementById("datasetDownloadVoltage").disabled = false;
     document.getElementById("datasetDownloadTemperature").disabled = false;
-    
-    updateStatus(`Dataset comparison complete - Segment loaded from index ${startIndex}`, "complete");
+
+    if (useTestSplit && resolvedIndex !== startIndex) {
+      updateStatus(`Dataset comparison complete - requested ${startIndex}, resolved to valid test index ${resolvedIndex}`, "complete");
+    } else {
+      updateStatus(`Dataset comparison complete - Segment loaded from index ${resolvedIndex}`, "complete");
+    }
     
   } catch (error) {
     console.error('Dataset comparison error:', error);
     updateStatus(`Error: ${error.message}. Make sure backend server is running.`, "ready");
   } finally {
     document.getElementById("datasetCompareBtn").disabled = false;
+    document.getElementById('datasetFindTestBtn').disabled = false;
   }
 });
 

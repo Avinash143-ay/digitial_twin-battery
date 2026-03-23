@@ -149,6 +149,20 @@
               <small>Number of steps (max 75)</small>
             </div>
           </div>
+
+          <div class="param-grid">
+            <div class="param-group">
+              <label class="radio-option" for="datasetUseTestSplit" style="margin-top: 8px;">
+                <input type="checkbox" id="datasetUseTestSplit" checked />
+                <span>Use KIT test split only (block 500: train 300, val 100, test 100)</span>
+              </label>
+              <small>Keeps testing strictly on the held-out split used in training notebooks</small>
+            </div>
+            <div class="param-group">
+              <button id="datasetFindTestBtn" class="generate-btn" type="button">Find Valid Test Index</button>
+              <small>Auto-adjusts start index to nearest valid test position</small>
+            </div>
+          </div>
           
           <button id="datasetCompareBtn" class="predict-btn">
             <span>🚀</span>
@@ -336,6 +350,88 @@
 
       <!-- Compare Tab -->
       <div id="compareTab" class="tab-content">
+        <section class="card prediction-card">
+          <h2>Adaptive Improve with Actual Data</h2>
+          <p>Upload your actual measurements, evaluate both models, then queue and tune models when error exceeds threshold.</p>
+
+          <div class="param-grid">
+            <div class="param-group">
+              <label for="adaptiveSOH">SOH for Prediction</label>
+              <input type="number" id="adaptiveSOH" min="0" max="1" step="0.01" value="0.95" />
+              <small>Used for model inference on uploaded current profile</small>
+            </div>
+            <div class="param-group">
+              <label for="adaptiveInitialVoltage">Initial Voltage (V)</label>
+              <input type="number" id="adaptiveInitialVoltage" min="2.4" max="4.2" step="0.01" value="3.7" />
+              <small>Starting value at first step</small>
+            </div>
+            <div class="param-group">
+              <label for="adaptiveInitialTemperature">Initial Temperature (°C)</label>
+              <input type="number" id="adaptiveInitialTemperature" min="-20" max="120" step="0.1" value="28" />
+              <small>Starting value at first step</small>
+            </div>
+          </div>
+
+          <label class="upload-area">
+            <input id="adaptiveActualInput" type="file" accept=".csv,text/csv" />
+            <div class="upload-content">
+              <span class="upload-icon">🧪</span>
+              <span class="upload-text">Upload CSV: current, voltage_actual, temperature_actual</span>
+            </div>
+          </label>
+          <div id="adaptiveFileInfo" class="file-info"></div>
+
+          <h3>Error Thresholds</h3>
+          <div class="param-grid">
+            <div class="param-group">
+              <label for="adaptiveMoeVoltageThreshold">MoE Voltage MAPE Threshold (%)</label>
+              <input type="number" id="adaptiveMoeVoltageThreshold" min="0.01" max="10" step="0.01" value="0.25" />
+            </div>
+            <div class="param-group">
+              <label for="adaptiveMoeTempThreshold">MoE Temp MAE Threshold (°C)</label>
+              <input type="number" id="adaptiveMoeTempThreshold" min="0.01" max="10" step="0.01" value="1.00" />
+            </div>
+            <div class="param-group">
+              <label for="adaptiveEnsembleVoltageThreshold">Ensemble Voltage MAPE Threshold (%)</label>
+              <input type="number" id="adaptiveEnsembleVoltageThreshold" min="0.01" max="10" step="0.01" value="0.60" />
+            </div>
+            <div class="param-group">
+              <label for="adaptiveEnsembleTempThreshold">Ensemble Temp MAE Threshold (°C)</label>
+              <input type="number" id="adaptiveEnsembleTempThreshold" min="0.01" max="10" step="0.01" value="1.20" />
+            </div>
+          </div>
+
+          <label class="threshold-toggle">
+            <input type="checkbox" id="adaptiveAutoQueue" />
+            <span>Automatically queue exceeded models for tuning</span>
+          </label>
+
+          <div class="train-btn-row">
+            <button id="adaptiveEvaluateBtn" class="predict-btn">Evaluate vs Actual</button>
+            <button id="adaptiveQueueBtn" class="ghost" disabled>Queue Exceeded Models</button>
+          </div>
+
+          <div id="adaptiveEvalStatus" class="adaptive-status">Waiting for evaluation...</div>
+
+          <div class="train-controls">
+            <div class="param-grid">
+              <div class="param-group">
+                <label for="adaptiveTrainEpochs">Training Epochs</label>
+                <input type="number" id="adaptiveTrainEpochs" min="1" max="20" step="1" value="2" />
+              </div>
+              <div class="param-group">
+                <label for="adaptiveTrainMaxSamples">Max Queued Samples</label>
+                <input type="number" id="adaptiveTrainMaxSamples" min="1" max="500" step="1" value="50" />
+              </div>
+            </div>
+            <div class="train-btn-row">
+              <button id="adaptiveTrainMoeBtn" class="ghost" disabled>Tune MoE (Adapter)</button>
+              <button id="adaptiveTrainEnsembleBtn" class="ghost" disabled>Tune Ensemble (Full)</button>
+            </div>
+            <div id="adaptiveTrainingStatus" class="training-status">Training status: idle</div>
+          </div>
+        </section>
+
         <section class="card">
           <h2>Upload CSV for Comparison</h2>
           <p>Upload a CSV with columns: voltage_actual, voltage_median_pred, temperature_actual, temperature_median_pred</p>

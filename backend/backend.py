@@ -1,12 +1,26 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import json
+from datetime import datetime
+import threading
+import time
+import random
 
-app = Flask(__name__)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+frontend_dir = os.path.join(script_dir, '..', 'frontend')
+
+app = Flask(__name__, static_folder=frontend_dir, static_url_path='')
 CORS(app)  # Enable CORS for browser requests
+
+KIT_BLOCK_SIZE = 500
+KIT_TRAIN_BLOCK_SIZE = 300
+KIT_VAL_BLOCK_SIZE = 100
+KIT_TEST_BLOCK_SIZE = 100
 
 # Define the DeepEnsemble model architecture
 class BaseModel(nn.Module):
@@ -262,6 +276,127 @@ class Digital_Twin_v1(nn.Module):
                                                 voltage_error_prediction, temp_error_prediction), dim=2)
         return predicted_mu_sigma_final
 
+
+class AdapterLinear(nn.Module):
+    def __init__(self, base_layer, rank=8, alpha=16.0, dropout=0.05):
+        super().__init__()
+        self.base_layer = base_layer
+        for param in self.base_layer.parameters():
+            param.requires_grad = False
+
+        self.rank = max(1, int(rank))
+        self.alpha = float(alpha)
+        self.scale = self.alpha / self.rank
+        self.dropout = nn.Dropout(float(dropout))
+
+        self.adapter_A = nn.Linear(base_layer.in_features, self.rank, bias=False)
+        self.adapter_B = nn.Linear(self.rank, base_layer.out_features, bias=False)
+
+        nn.init.kaiming_uniform_(self.adapter_A.weight, a=np.sqrt(5))
+        nn.init.zeros_(self.adapter_B.weight)
+
+    def forward(self, x):
+        base_out = self.base_layer(x)
+        delta = self.adapter_B(self.dropout(self.adapter_A(x)))
+        return base_out + self.scale * delta
+
+
+DEFAULT_MOE_ADAPTER_TARGETS = [
+    'embedding_layer',
+    'volt_lin_final1', 'volt_lin_final2',
+    'temp_lin_final1', 'temp_lin_final2',
+    'volt_lin_esti_1_mu', 'volt_lin_esti_2_mu', 'volt_lin_esti_3_mu',
+    'volt_lin_esti_1_sigma', 'volt_lin_esti_2_sigma', 'volt_lin_esti_3_sigma',
+    'temp_lin_esti_1_mu', 'temp_lin_esti_2_mu', 'temp_lin_esti_3_mu',
+    'temp_lin_esti_1_sigma', 'temp_lin_esti_2_sigma', 'temp_lin_esti_3_sigma'
+]
+
+
+def get_module_by_path(root_module, module_path):
+    module = root_module
+    for part in module_path.split('.'):
+        if part.isdigit():
+            module = module[int(part)]
+        else:
+            module = getattr(module, part)
+    return module
+
+
+def set_module_by_path(root_module, module_path, new_module):
+    parts = module_path.split('.')
+    parent = root_module
+    for part in parts[:-1]:
+        if part.isdigit():
+            parent = parent[int(part)]
+        else:
+            parent = getattr(parent, part)
+
+    last_part = parts[-1]
+    if last_part.isdigit():
+        parent[int(last_part)] = new_module
+    else:
+        setattr(parent, last_part, new_module)
+
+
+def ensure_moe_adapters(base_model, target_modules, rank=8, alpha=16.0, dropout=0.05):
+    applied_modules = []
+    for module_name in target_modules:
+        try:
+            original_module = get_module_by_path(base_model, module_name)
+        except Exception:
+            continue
+
+        if isinstance(original_module, AdapterLinear):
+            continue
+
+        if isinstance(original_module, nn.Linear):
+            adapter_layer = AdapterLinear(original_module, rank=rank, alpha=alpha, dropout=dropout)
+            set_module_by_path(base_model, module_name, adapter_layer)
+            applied_modules.append(module_name)
+
+    return applied_modules
+
+
+def get_moe_adapter_parameters(base_model):
+    adapter_params = []
+    for module in base_model.modules():
+        if isinstance(module, AdapterLinear):
+            adapter_params.extend(list(module.adapter_A.parameters()))
+            adapter_params.extend(list(module.adapter_B.parameters()))
+    return adapter_params
+
+
+def save_moe_adapter_checkpoint(base_model, checkpoint_path, config):
+    adapter_state_dict = {
+        name: tensor.cpu()
+        for name, tensor in base_model.state_dict().items()
+        if '.adapter_A.' in name or '.adapter_B.' in name
+    }
+
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+    torch.save({
+        'adapter_state_dict': adapter_state_dict,
+        'config': config,
+        'updated_at': datetime.utcnow().isoformat() + 'Z'
+    }, checkpoint_path)
+
+
+def load_moe_adapter_checkpoint(base_model, checkpoint_path):
+    if not os.path.exists(checkpoint_path):
+        return None
+
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    config = checkpoint.get('config', {})
+    target_modules = config.get('target_modules', DEFAULT_MOE_ADAPTER_TARGETS)
+    rank = int(config.get('rank', 8))
+    alpha = float(config.get('alpha', 16.0))
+    dropout = float(config.get('dropout', 0.05))
+
+    ensure_moe_adapters(base_model, target_modules, rank=rank, alpha=alpha, dropout=dropout)
+    adapter_state_dict = checkpoint.get('adapter_state_dict', {})
+    base_model.load_state_dict(adapter_state_dict, strict=False)
+    return config
+
 # Initialize and load the MoE-Enhanced Transformer model
 print("Loading MoE-Enhanced Digital Twin model...")
 model = Digital_Twin_v1(
@@ -274,8 +409,15 @@ model = Digital_Twin_v1(
 )
 
 # Load MoE Transformer model weights
-import os
-script_dir = os.path.dirname(os.path.abspath(__file__))
+MOE_ADAPTER_PATH = os.path.join(script_dir, '..', 'models', 'moe_lora_adapter.pt')
+
+moe_adapter_config = {
+    'rank': 8,
+    'alpha': 16.0,
+    'dropout': 0.05,
+    'target_modules': list(DEFAULT_MOE_ADAPTER_TARGETS)
+}
+
 try:
     saved_model_path = os.path.join(script_dir, '..', 'Digital_Twin', 'digital_twin_best.pt')
     checkpoint = torch.load(saved_model_path, map_location=torch.device('cpu'))
@@ -289,6 +431,14 @@ except Exception as e:
     print(f"Warning: Could not load MoE Transformer model weights: {e}")
     print("Using untrained model for demonstration purposes.")
     model.eval()
+
+try:
+    loaded_adapter_config = load_moe_adapter_checkpoint(model, MOE_ADAPTER_PATH)
+    if loaded_adapter_config:
+        moe_adapter_config.update(loaded_adapter_config)
+        print(f"Loaded MoE LoRA adapters from {MOE_ADAPTER_PATH}")
+except Exception as e:
+    print(f"Warning: Could not load MoE LoRA adapters: {e}")
 
 # Initialize and load the DeepEnsemble model
 print("Loading DeepEnsemble model...")
@@ -309,6 +459,466 @@ except Exception as e:
     ensemble_model.eval()
 
 device = torch.device("cpu")
+
+training_lock = threading.Lock()
+training_state = {
+    'running': False,
+    'status': 'idle',
+    'model_name': None,
+    'tuning_mode': None,
+    'message': 'No training job started yet.',
+    'started_at': None,
+    'finished_at': None,
+    'processed_samples': 0,
+    'total_samples': 0,
+    'trainable_parameters': 0,
+    'last_loss': None,
+    'last_saved_model': None,
+    'error': None
+}
+
+
+def update_training_state(**kwargs):
+    with training_lock:
+        training_state.update(kwargs)
+
+
+def get_training_state_snapshot():
+    with training_lock:
+        return dict(training_state)
+
+
+def count_dataset_rows(dataset_path):
+    # Count data rows excluding header without loading the entire CSV into memory.
+    total_lines = 0
+    with open(dataset_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for _ in f:
+            total_lines += 1
+    return max(0, total_lines - 1)
+
+
+def build_block_split_ranges(total_rows, sequence_length):
+    required_rows = max(2, int(sequence_length) + 1)
+    max_start = total_rows - required_rows
+    split_ranges = {
+        'train': [],
+        'val': [],
+        'test': []
+    }
+
+    if max_start < 0:
+        return split_ranges
+
+    section_specs = (
+        ('train', 0, KIT_TRAIN_BLOCK_SIZE),
+        ('val', KIT_TRAIN_BLOCK_SIZE, KIT_VAL_BLOCK_SIZE),
+        ('test', KIT_TRAIN_BLOCK_SIZE + KIT_VAL_BLOCK_SIZE, KIT_TEST_BLOCK_SIZE),
+    )
+
+    for block_start in range(0, total_rows, KIT_BLOCK_SIZE):
+        block_end = min(block_start + KIT_BLOCK_SIZE, total_rows)
+
+        for section_name, section_offset, section_size in section_specs:
+            section_start = block_start + section_offset
+            section_end = min(section_start + section_size, block_end)
+
+            if section_start >= section_end:
+                continue
+
+            valid_end = min(section_end - required_rows, max_start)
+            if section_start <= valid_end:
+                split_ranges[section_name].append((section_start, valid_end))
+
+    return split_ranges
+
+
+def count_range_positions(ranges):
+    return int(sum((end - start + 1) for start, end in ranges))
+
+
+def index_in_ranges(index, ranges):
+    return any(start <= index <= end for start, end in ranges)
+
+
+def nearest_index_in_ranges(index, ranges):
+    if not ranges:
+        return None
+
+    best_index = None
+    best_distance = None
+
+    for start, end in ranges:
+        if index < start:
+            candidate = start
+        elif index > end:
+            candidate = end
+        else:
+            return index
+
+        distance = abs(candidate - index)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_index = candidate
+
+    return best_index
+
+
+def load_retraining_records(model_name, max_samples=50):
+    queue_path = os.path.join(script_dir, '..', 'retraining_queue', f'{model_name}_high_error_segments.jsonl')
+    if not os.path.exists(queue_path):
+        return [], queue_path
+
+    records = []
+    with open(queue_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if max_samples > 0:
+        records = records[-max_samples:]
+    return records, queue_path
+
+
+def build_moe_training_sample(record):
+    params = record.get('parameters', {})
+    actual = record.get('actual', {})
+    current_profile = params.get('current_profile', [])
+    voltage_actual = actual.get('voltage', [])
+    temp_actual = actual.get('temperature', [])
+
+    if not current_profile or not voltage_actual or not temp_actual:
+        return None
+
+    steps = min(len(current_profile), len(voltage_actual), len(temp_actual), 150)
+    if steps < 2:
+        return None
+
+    relative_age_value = float(params.get('relative_age', params.get('soh', 0.65)))
+    initial_voltage = float(params.get('initial_voltage', voltage_actual[0]))
+    initial_temp = float(params.get('initial_temperature', temp_actual[0]))
+
+    initial_state = torch.tensor([[relative_age_value, initial_voltage, initial_temp]], dtype=torch.float32, device=device)
+    actions = torch.tensor([current_profile[:steps]], dtype=torch.float32, device=device).unsqueeze(-1)
+    target_voltage = torch.tensor(voltage_actual[:steps], dtype=torch.float32, device=device)
+    target_temp = torch.tensor(temp_actual[:steps], dtype=torch.float32, device=device)
+    return initial_state, actions, target_voltage, target_temp
+
+
+def build_ensemble_training_sample(record):
+    params = record.get('parameters', {})
+    actual = record.get('actual', {})
+    current_profile = params.get('current_profile', [])
+    voltage_actual = actual.get('voltage', [])
+    temp_actual = actual.get('temperature', [])
+
+    if not current_profile or not voltage_actual or not temp_actual:
+        return None
+
+    steps = min(len(current_profile), len(voltage_actual), len(temp_actual), 75)
+    if steps < 2:
+        return None
+
+    relative_age = float(params.get('relative_age', 1 - float(params.get('soh', 0.65))))
+    initial_voltage = float(params.get('initial_voltage', voltage_actual[0]))
+    initial_temp = float(params.get('initial_temperature', temp_actual[0]))
+
+    return {
+        'relative_age': relative_age,
+        'initial_voltage': initial_voltage,
+        'initial_temperature': initial_temp,
+        'current_profile': [float(v) for v in current_profile[:steps]],
+        'voltage_actual': [float(v) for v in voltage_actual[:steps]],
+        'temp_actual': [float(v) for v in temp_actual[:steps]],
+        'steps': steps
+    }
+
+
+def train_moe_on_records(records, epochs=1, lr=1e-4):
+    for param in model.parameters():
+        param.requires_grad = True
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    model.train()
+
+    valid_samples = 0
+    last_loss = None
+    for epoch in range(epochs):
+        for rec in records:
+            sample = build_moe_training_sample(rec)
+            if sample is None:
+                continue
+
+            initial_state, actions, target_voltage, target_temp = sample
+
+            optimizer.zero_grad()
+            predictions = model(initial_state, actions)
+            pred_voltage = predictions[0, :, 0]
+            pred_temp = predictions[0, :, 1]
+
+            loss_voltage = F.mse_loss(pred_voltage, target_voltage)
+            loss_temp = F.mse_loss(pred_temp, target_temp)
+            loss = loss_voltage + loss_temp
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            valid_samples += 1
+            last_loss = float(loss.item())
+
+            update_training_state(
+                processed_samples=valid_samples,
+                last_loss=last_loss,
+                message=f'MoE full tuning in progress: sample {valid_samples}'
+            )
+
+    model.eval()
+    return valid_samples, last_loss
+
+
+def train_moe_adapter_on_records(records, epochs=1, lr=1e-4, rank=8, alpha=16.0,
+                                 dropout=0.05, batch_size=4, accumulation_steps=1,
+                                 target_modules=None):
+    if target_modules is None or not target_modules:
+        target_modules = list(DEFAULT_MOE_ADAPTER_TARGETS)
+
+    ensure_moe_adapters(model, target_modules, rank=rank, alpha=alpha, dropout=dropout)
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    adapter_params = get_moe_adapter_parameters(model)
+    if not adapter_params:
+        return 0, None, 0
+
+    for param in adapter_params:
+        param.requires_grad = True
+
+    optimizer = torch.optim.Adam(adapter_params, lr=lr)
+    model.train()
+
+    valid_samples = 0
+    last_loss = None
+    pending_samples = 0
+    samples_per_update = max(1, int(batch_size)) * max(1, int(accumulation_steps))
+    optimizer.zero_grad()
+
+    for epoch in range(epochs):
+        for rec in records:
+            sample = build_moe_training_sample(rec)
+            if sample is None:
+                continue
+
+            initial_state, actions, target_voltage, target_temp = sample
+            predictions = model(initial_state, actions)
+            pred_voltage = predictions[0, :, 0]
+            pred_temp = predictions[0, :, 1]
+
+            loss_voltage = F.mse_loss(pred_voltage, target_voltage)
+            loss_temp = F.mse_loss(pred_temp, target_temp)
+            raw_loss = loss_voltage + loss_temp
+            loss = raw_loss / samples_per_update
+            loss.backward()
+
+            valid_samples += 1
+            pending_samples += 1
+            last_loss = float(raw_loss.item())
+
+            if pending_samples >= samples_per_update:
+                torch.nn.utils.clip_grad_norm_(adapter_params, max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                pending_samples = 0
+
+            update_training_state(
+                processed_samples=valid_samples,
+                last_loss=last_loss,
+                message=f'MoE adapter tuning in progress: sample {valid_samples}'
+            )
+
+    if pending_samples > 0:
+        torch.nn.utils.clip_grad_norm_(adapter_params, max_norm=1.0)
+        optimizer.step()
+        optimizer.zero_grad()
+
+    model.eval()
+    return valid_samples, last_loss, len(adapter_params)
+
+
+def train_ensemble_on_records(records, epochs=1, lr=1e-4):
+    optimizer = torch.optim.Adam(ensemble_model.parameters(), lr=lr)
+    ensemble_model.train()
+
+    valid_samples = 0
+    last_loss = None
+
+    for epoch in range(epochs):
+        epoch_records = list(records)
+        random.shuffle(epoch_records)
+
+        # Start with stronger teacher forcing and relax it across epochs.
+        teacher_forcing_ratio = max(0.25, 0.8 - (0.15 * epoch))
+
+        for rec in epoch_records:
+            sample = build_ensemble_training_sample(rec)
+            if sample is None:
+                continue
+
+            optimizer.zero_grad()
+            total_loss = 0.0
+            age = sample['relative_age']
+            current_profile = sample['current_profile']
+            voltage_actual = sample['voltage_actual']
+            temp_actual = sample['temp_actual']
+            steps = sample['steps']
+
+            prev_voltage = sample['initial_voltage']
+            prev_temp = sample['initial_temperature']
+            prev_current = 0.0
+
+            for step in range(steps):
+                next_current = current_profile[step]
+                initial_state = torch.tensor([[age, prev_voltage, prev_temp, prev_current]], dtype=torch.float32, device=device)
+                action = torch.tensor([[next_current]], dtype=torch.float32, device=device)
+
+                outputs = ensemble_model(initial_state, action)
+                target = torch.tensor([voltage_actual[step], temp_actual[step]], dtype=torch.float32, device=device)
+                target = target.unsqueeze(0).repeat(outputs.shape[0], 1)
+                step_loss = F.mse_loss(outputs[:, 0, :], target)
+                total_loss = total_loss + step_loss
+
+                # Blend actual and predicted state to reduce train/inference mismatch.
+                median_pred_voltage = torch.median(outputs[:, 0, 0]).detach()
+                median_pred_temp = torch.median(outputs[:, 0, 1]).detach()
+                median_pred_voltage = torch.clamp(median_pred_voltage, min=2.4, max=4.2)
+
+                prev_voltage = (teacher_forcing_ratio * voltage_actual[step]) + ((1.0 - teacher_forcing_ratio) * float(median_pred_voltage.item()))
+                prev_temp = (teacher_forcing_ratio * temp_actual[step]) + ((1.0 - teacher_forcing_ratio) * float(median_pred_temp.item()))
+                prev_current = next_current
+
+            total_loss = total_loss / steps
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(ensemble_model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            valid_samples += 1
+            last_loss = float(total_loss.item())
+
+            update_training_state(
+                processed_samples=valid_samples,
+                last_loss=last_loss,
+                message=f'Ensemble training in progress: sample {valid_samples}'
+            )
+
+    ensemble_model.eval()
+    return valid_samples, last_loss
+
+
+def training_worker(model_name, epochs=1, max_samples=50, lr=1e-4, tuning_mode='full',
+                    rank=8, alpha=16.0, dropout=0.05, batch_size=4,
+                    accumulation_steps=1, target_modules=None):
+    try:
+        update_training_state(
+            running=True,
+            status='running',
+            model_name=model_name,
+            tuning_mode=tuning_mode,
+            message=f'Starting {model_name.upper()} retraining ({tuning_mode})...',
+            started_at=datetime.utcnow().isoformat() + 'Z',
+            finished_at=None,
+            processed_samples=0,
+            total_samples=0,
+            trainable_parameters=0,
+            last_loss=None,
+            error=None
+        )
+
+        records, queue_path = load_retraining_records(model_name, max_samples=max_samples)
+        total_samples = len(records) * max(1, int(epochs))
+        update_training_state(total_samples=total_samples, message=f'Loaded {len(records)} queued samples from {queue_path}')
+
+        if not records:
+            update_training_state(
+                running=False,
+                status='idle',
+                message=f'No queued samples found for {model_name.upper()} at {queue_path}.',
+                finished_at=datetime.utcnow().isoformat() + 'Z'
+            )
+            return
+
+        if model_name == 'moe':
+            if tuning_mode == 'adapter':
+                trained_samples, last_loss, trainable_params = train_moe_adapter_on_records(
+                    records,
+                    epochs=epochs,
+                    lr=lr,
+                    rank=rank,
+                    alpha=alpha,
+                    dropout=dropout,
+                    batch_size=batch_size,
+                    accumulation_steps=accumulation_steps,
+                    target_modules=target_modules
+                )
+                moe_adapter_config.update({
+                    'rank': int(rank),
+                    'alpha': float(alpha),
+                    'dropout': float(dropout),
+                    'target_modules': list(target_modules or DEFAULT_MOE_ADAPTER_TARGETS)
+                })
+                save_path = MOE_ADAPTER_PATH
+                save_moe_adapter_checkpoint(model, save_path, moe_adapter_config)
+                update_training_state(trainable_parameters=trainable_params)
+            else:
+                trained_samples, last_loss = train_moe_on_records(records, epochs=epochs, lr=lr)
+                save_path = os.path.join(script_dir, '..', 'models', 'moe_finetuned.pt')
+                torch.save({'state_dict': model.state_dict(), 'updated_at': datetime.utcnow().isoformat() + 'Z'}, save_path)
+        else:
+            if tuning_mode == 'adapter':
+                update_training_state(
+                    running=False,
+                    status='failed',
+                    message='Adapter tuning is currently supported only for the MoE model.',
+                    error='Unsupported tuning_mode=adapter for ensemble',
+                    finished_at=datetime.utcnow().isoformat() + 'Z'
+                )
+                return
+            trained_samples, last_loss = train_ensemble_on_records(records, epochs=epochs, lr=lr)
+            save_path = os.path.join(script_dir, '..', 'models', 'ensemble_finetuned.pt')
+            torch.save({'state_dict': ensemble_model.state_dict(), 'updated_at': datetime.utcnow().isoformat() + 'Z'}, save_path)
+
+        if trained_samples == 0:
+            update_training_state(
+                running=False,
+                status='failed',
+                message=f'No valid samples could be built for {model_name.upper()} training.',
+                error='Queued samples missing required fields such as parameters.current_profile or actual targets.',
+                finished_at=datetime.utcnow().isoformat() + 'Z'
+            )
+            return
+
+        update_training_state(
+            running=False,
+            status='completed',
+            message=f'{model_name.upper()} retraining completed on {trained_samples} samples.',
+            finished_at=datetime.utcnow().isoformat() + 'Z',
+            last_loss=last_loss,
+            last_saved_model=save_path
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        update_training_state(
+            running=False,
+            status='failed',
+            error=str(e),
+            message=f'{model_name.upper()} retraining failed.',
+            finished_at=datetime.utcnow().isoformat() + 'Z'
+        )
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -466,15 +1076,92 @@ def predict_ensemble():
             'message': str(e)
         }), 400
 
+
+@app.route('/dataset_split_info', methods=['POST'])
+def dataset_split_info():
+    try:
+        data = request.json or {}
+        sequence_length = int(data.get('sequence_length', 75))
+
+        if sequence_length < 2 or sequence_length > 150:
+            return jsonify({
+                'status': 'error',
+                'message': 'sequence_length must be between 2 and 150'
+            }), 400
+
+        dataset_path = os.path.join(script_dir, '..', 'data', 'cell_log_age_2s_P065_1_S01_C03', 'cell_log_age_2s_P065_1_S01_C03.csv')
+        if not os.path.exists(dataset_path):
+            return jsonify({
+                'status': 'error',
+                'message': f'Dataset not found at {dataset_path}'
+            }), 404
+
+        total_rows = count_dataset_rows(dataset_path)
+        split_ranges = build_block_split_ranges(total_rows, sequence_length)
+
+        train_ranges = split_ranges.get('train', [])
+        val_ranges = split_ranges.get('val', [])
+        test_ranges = split_ranges.get('test', [])
+
+        if not test_ranges:
+            return jsonify({
+                'status': 'error',
+                'message': f'No valid test segments for sequence_length={sequence_length}. Reduce sequence length.'
+            }), 400
+
+        requested_start = data.get('requested_start_index')
+        try:
+            requested_start_int = int(requested_start) if requested_start is not None else test_ranges[0][0]
+        except Exception:
+            requested_start_int = test_ranges[0][0]
+
+        suggested_test_start = nearest_index_in_ranges(requested_start_int, test_ranges)
+
+        return jsonify({
+            'status': 'success',
+            'split': {
+                'strategy': f'block_{KIT_BLOCK_SIZE}_train_{KIT_TRAIN_BLOCK_SIZE}_val_{KIT_VAL_BLOCK_SIZE}_test_{KIT_TEST_BLOCK_SIZE}',
+                'sequence_length': sequence_length,
+                'dataset_total_rows': total_rows,
+                'train_count': count_range_positions(train_ranges),
+                'val_count': count_range_positions(val_ranges),
+                'test_count': count_range_positions(test_ranges),
+                'test_first_index': int(test_ranges[0][0]),
+                'test_last_index': int(test_ranges[-1][1]),
+                'suggested_test_start': int(suggested_test_start),
+                'requested_start_index': int(requested_start_int)
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
+
 @app.route('/compare_with_dataset', methods=['POST'])
 def compare_with_dataset():
     try:
         import pandas as pd
-        data = request.json
+        data = request.json or {}
         
         # Get parameters
-        start_index = int(data.get('start_index', 10000))
+        requested_start_index = data.get('start_index', 10000)
         sequence_length = int(data.get('sequence_length', 75))
+        use_test_split = bool(data.get('use_test_split', False))
+
+        if sequence_length < 2 or sequence_length > 150:
+            return jsonify({
+                'status': 'error',
+                'message': 'sequence_length must be between 2 and 150'
+            }), 400
+
+        try:
+            requested_start_index = int(requested_start_index)
+        except Exception:
+            requested_start_index = 10000
         
         # Load segment from KIT dataset
         dataset_path = os.path.join(script_dir, '..', 'data', 'cell_log_age_2s_P065_1_S01_C03', 'cell_log_age_2s_P065_1_S01_C03.csv')
@@ -484,9 +1171,54 @@ def compare_with_dataset():
                 'status': 'error',
                 'message': f'Dataset not found at {dataset_path}'
             }), 404
+
+        total_rows = count_dataset_rows(dataset_path)
+        max_start = total_rows - (sequence_length + 1)
+        if max_start < 0:
+            return jsonify({
+                'status': 'error',
+                'message': f'Not enough dataset rows for sequence_length={sequence_length}.'
+            }), 400
+
+        split_ranges = build_block_split_ranges(total_rows, sequence_length)
+        test_ranges = split_ranges.get('test', [])
+
+        if use_test_split and not test_ranges:
+            return jsonify({
+                'status': 'error',
+                'message': f'No valid test segments for sequence_length={sequence_length}. Reduce sequence length.'
+            }), 400
+
+        start_index = requested_start_index
+        if use_test_split:
+            start_index = nearest_index_in_ranges(requested_start_index, test_ranges)
+
+        if start_index is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Could not resolve a valid start index for requested split.'
+            }), 400
+
+        if start_index < 0 or start_index > max_start:
+            return jsonify({
+                'status': 'error',
+                'message': f'start_index must be between 0 and {max_start} for sequence_length={sequence_length}'
+            }), 400
+
+        if use_test_split and not index_in_ranges(start_index, test_ranges):
+            return jsonify({
+                'status': 'error',
+                'message': 'Resolved start_index is not inside the test split.'
+            }), 400
         
         # Read the specific segment
         df = pd.read_csv(dataset_path, sep=';', skiprows=range(1, start_index), nrows=sequence_length+1)
+
+        if len(df) < 2:
+            return jsonify({
+                'status': 'error',
+                'message': f'No valid segment found at start_index={start_index}. Choose a different index.'
+            }), 400
         
         # Extract data
         initial_row = df.iloc[0]
@@ -572,10 +1304,22 @@ def compare_with_dataset():
             },
             'parameters': {
                 'start_index': start_index,
+                'requested_start_index': requested_start_index,
                 'sequence_length': steps,
                 'initial_voltage': initial_voltage,
                 'initial_temperature': initial_temp,
-                'soh': soh
+                'soh': soh,
+                'relative_age': relative_age,
+                'current_profile': current_profile
+            },
+            'data_split': {
+                'strategy': f'block_{KIT_BLOCK_SIZE}_train_{KIT_TRAIN_BLOCK_SIZE}_val_{KIT_VAL_BLOCK_SIZE}_test_{KIT_TEST_BLOCK_SIZE}',
+                'use_test_split': use_test_split,
+                'requested_start_index': requested_start_index,
+                'resolved_start_index': start_index,
+                'test_count': count_range_positions(test_ranges),
+                'test_first_index': int(test_ranges[0][0]) if test_ranges else None,
+                'test_last_index': int(test_ranges[-1][1]) if test_ranges else None
             }
         })
         
@@ -587,11 +1331,260 @@ def compare_with_dataset():
             'message': str(e)
         }), 400
 
+@app.route('/queue_retraining_sample', methods=['POST'])
+def queue_retraining_sample():
+    try:
+        data = request.json or {}
+
+        start_index = data.get('start_index')
+        sequence_length = data.get('sequence_length')
+        thresholds = data.get('thresholds', {})
+        metrics = data.get('metrics', {})
+        exceeded = data.get('exceeded', {})
+        models_to_train = data.get('models_to_train', [])
+
+        if start_index is None or sequence_length is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'start_index and sequence_length are required'
+            }), 400
+
+        if not isinstance(models_to_train, list):
+            models_to_train = []
+
+        # Backward-compatible derivation when models_to_train is not explicitly sent.
+        if not models_to_train and isinstance(exceeded, dict):
+            moe_exceeded = exceeded.get('moe', {}) if isinstance(exceeded.get('moe', {}), dict) else {}
+            ens_exceeded = exceeded.get('ensemble', {}) if isinstance(exceeded.get('ensemble', {}), dict) else {}
+
+            if any(bool(v) for v in moe_exceeded.values()):
+                models_to_train.append('moe')
+            if any(bool(v) for v in ens_exceeded.values()):
+                models_to_train.append('ensemble')
+
+        # Fallback for old payload format with flat exceeded keys.
+        if not models_to_train and isinstance(exceeded, dict):
+            if exceeded.get('voltage_mape') or exceeded.get('temp_mae'):
+                models_to_train.append('moe')
+
+        queue_dir = os.path.join(script_dir, '..', 'retraining_queue')
+        os.makedirs(queue_dir, exist_ok=True)
+        queue_file = os.path.join(queue_dir, 'high_error_segments.jsonl')
+
+        # Persist full segment context so it can be used for future training scripts.
+        record = {
+            'timestamp_utc': datetime.utcnow().isoformat() + 'Z',
+            'triggered_by': data.get('triggered_by', 'manual'),
+            'start_index': int(start_index),
+            'sequence_length': int(sequence_length),
+            'thresholds': thresholds,
+            'metrics': metrics,
+            'exceeded': exceeded,
+            'models_to_train': models_to_train,
+            'parameters': data.get('parameters', {}),
+            'actual': data.get('actual', {}),
+            'moe': data.get('moe', {}),
+            'ensemble': data.get('ensemble', {})
+        }
+
+        with open(queue_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record) + '\n')
+
+        # Also write per-model queue files to simplify model-specific retraining jobs.
+        for model_name in models_to_train:
+            if model_name not in ('moe', 'ensemble'):
+                continue
+            model_queue_file = os.path.join(queue_dir, f'{model_name}_high_error_segments.jsonl')
+            with open(model_queue_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(record) + '\n')
+
+        queued_models_text = ', '.join(models_to_train).upper() if models_to_train else 'NONE'
+
+        return jsonify({
+            'status': 'success',
+            'message': f"Queued segment {start_index} for retraining ({queued_models_text}).",
+            'queue_file': queue_file,
+            'models_to_train': models_to_train,
+            'next_step': 'Use retraining_queue/high_error_segments.jsonl in your training pipeline.'
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
+
+
+@app.route('/train_queued_model', methods=['POST'])
+def train_queued_model():
+    try:
+        data = request.json or {}
+        model_name = str(data.get('model_name', '')).strip().lower()
+        epochs = int(data.get('epochs', 1))
+        max_samples = int(data.get('max_samples', 50))
+        lr = float(data.get('learning_rate', 1e-4))
+        tuning_mode = str(data.get('tuning_mode', 'adapter' if model_name == 'moe' else 'full')).strip().lower()
+
+        rank = int(data.get('rank', moe_adapter_config.get('rank', 8)))
+        alpha = float(data.get('alpha', moe_adapter_config.get('alpha', 16.0)))
+        dropout = float(data.get('dropout', moe_adapter_config.get('dropout', 0.05)))
+        batch_size = int(data.get('batch_size', 4))
+        accumulation_steps = int(data.get('accumulation_steps', 1))
+
+        target_modules = data.get('target_modules', moe_adapter_config.get('target_modules', DEFAULT_MOE_ADAPTER_TARGETS))
+        if not isinstance(target_modules, list) or not target_modules:
+            target_modules = list(DEFAULT_MOE_ADAPTER_TARGETS)
+
+        if model_name not in ('moe', 'ensemble'):
+            return jsonify({
+                'status': 'error',
+                'message': 'model_name must be either "moe" or "ensemble"'
+            }), 400
+
+        if tuning_mode not in ('full', 'adapter'):
+            return jsonify({
+                'status': 'error',
+                'message': 'tuning_mode must be either "full" or "adapter"'
+            }), 400
+
+        if model_name == 'ensemble' and tuning_mode == 'adapter':
+            return jsonify({
+                'status': 'error',
+                'message': 'Adapter tuning is currently supported only for model_name="moe"'
+            }), 400
+
+        if epochs < 1 or epochs > 20:
+            return jsonify({
+                'status': 'error',
+                'message': 'epochs must be between 1 and 20'
+            }), 400
+
+        if max_samples < 1 or max_samples > 500:
+            return jsonify({
+                'status': 'error',
+                'message': 'max_samples must be between 1 and 500'
+            }), 400
+
+        if lr <= 0 or lr > 0.01:
+            return jsonify({
+                'status': 'error',
+                'message': 'learning_rate must be > 0 and <= 0.01'
+            }), 400
+
+        if rank < 1 or rank > 128:
+            return jsonify({
+                'status': 'error',
+                'message': 'rank must be between 1 and 128'
+            }), 400
+
+        if alpha <= 0 or alpha > 1024:
+            return jsonify({
+                'status': 'error',
+                'message': 'alpha must be > 0 and <= 1024'
+            }), 400
+
+        if dropout < 0 or dropout >= 1:
+            return jsonify({
+                'status': 'error',
+                'message': 'dropout must be in [0, 1)'
+            }), 400
+
+        if batch_size < 1 or batch_size > 128:
+            return jsonify({
+                'status': 'error',
+                'message': 'batch_size must be between 1 and 128'
+            }), 400
+
+        if accumulation_steps < 1 or accumulation_steps > 128:
+            return jsonify({
+                'status': 'error',
+                'message': 'accumulation_steps must be between 1 and 128'
+            }), 400
+
+        state = get_training_state_snapshot()
+        if state.get('running'):
+            return jsonify({
+                'status': 'busy',
+                'message': f"Training already running for {state.get('model_name', 'unknown').upper()}.",
+                'training_state': state
+            }), 409
+
+        worker = threading.Thread(
+            target=training_worker,
+            args=(
+                model_name,
+                epochs,
+                max_samples,
+                lr,
+                tuning_mode,
+                rank,
+                alpha,
+                dropout,
+                batch_size,
+                accumulation_steps,
+                target_modules
+            ),
+            daemon=True
+        )
+        worker.start()
+
+        return jsonify({
+            'status': 'started',
+            'message': f'Started background retraining for {model_name.upper()} ({tuning_mode}).',
+            'requested': {
+                'model_name': model_name,
+                'tuning_mode': tuning_mode,
+                'epochs': epochs,
+                'max_samples': max_samples,
+                'learning_rate': lr,
+                'rank': rank,
+                'alpha': alpha,
+                'dropout': dropout,
+                'batch_size': batch_size,
+                'accumulation_steps': accumulation_steps,
+                'target_modules': target_modules
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
+
+
+@app.route('/training_status', methods=['GET'])
+def training_status():
+    return jsonify({
+        'status': 'success',
+        'training': get_training_state_snapshot()
+    })
+
+
+@app.route('/')
+def serve_index():
+    return send_from_directory(frontend_dir, 'index.html')
+
+
+@app.route('/<path:path>')
+def serve_frontend_assets(path):
+    # Serve frontend assets and support direct URL access by falling back to index.html.
+    target_path = os.path.join(frontend_dir, path)
+    if os.path.exists(target_path) and os.path.isfile(target_path):
+        return send_from_directory(frontend_dir, path)
+    return send_from_directory(frontend_dir, 'index.html')
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'healthy', 'model': 'ready'})
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
     print("Starting Lightweight Digital Twin Forecasting Server...")
-    print("Server running at http://localhost:5000")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print(f"Server running on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)

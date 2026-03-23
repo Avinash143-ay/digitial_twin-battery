@@ -1,3 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap");
+
 :root {
   color-scheme: light;
   --bg: #f5f7fb;
@@ -15,9 +17,17 @@
 
 body {
   margin: 0;
-  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "Manrope", "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--text);
+}
+
+h1,
+h2,
+h3,
+h4,
+.tab-btn {
+  font-family: "Space Grotesk", "Manrope", sans-serif;
 }
 
 .container {
@@ -402,6 +412,73 @@ body {
 .ghost:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.threshold-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 16px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.train-btn-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.train-controls {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+
+.adaptive-status {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #1e3a8a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.adaptive-status.alert {
+  background: #ffebee;
+  color: #b71c1c;
+}
+
+.adaptive-status.ok {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.training-status {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #1e3a8a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.training-status.running {
+  background: #fff3cd;
+  color: #7a4b00;
+}
+
+.training-status.success {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.training-status.error {
+  background: #ffebee;
+  color: #b71c1c;
 }
 
 pre {
