@@ -145,23 +145,41 @@
 % COLUMN 2
 % ============================================================
 
-\begin{bluebox}[title=🧠 Model 1: MoE Transformer]
+\begin{bluebox}[title=🧠 Model 1: MoE-Enhanced Transformer]
 \large
 \textbf{Architecture:}
+
 \begin{itemize}
-    \item \textbf{Input:} [Relative\_Age, V₀, T₀, I\_seq]
-    \item \textbf{Encoder:} 2-layer Transformer
-    \item \textbf{MoE:} 1000+ experts, top-20 routing
-    \item \textbf{Output:} V(μ,σ), T(μ,σ)
-    \item \textbf{Horizon:} 150 steps (300s)
+    \item \textbf{3 Cascaded MoE Layers}
+    \begin{itemize}
+        \item Layer 1: 64→100 dims, 1000 experts
+        \item Layer 12: 100→50 dims, 1000 experts
+        \item Layer 13: 10→2 dims, 1000 experts
+    \end{itemize}
+    \item \textbf{Top-20 Dynamic Routing} per layer
+    \item \textbf{2-Layer Transformer} (64 dim, 2 heads)
+    \item \textbf{Dual-Branch Output}: μ/σ for voltage \& temperature
+    \item \textbf{Parameters}: ~500K
+    \item \textbf{Prediction Horizon}: 150 steps (300s)
+\end{itemize}
+
+\vspace{0.5cm}
+\textbf{Performance:}
+\begin{itemize}
+    \item \textbf{Voltage MAPE}: 0.158\% \textbf{⭐}
+    \item \textbf{Temperature MAPE}: 0.698\%
+    \item \textbf{Validation Loss}: 0.00219
+    \item \textbf{Inference Time}: <50ms
+    \item \textbf{Win Rate}: 94.4\% (17/18 segments)
 \end{itemize}
 
 \textbf{Key Features:}
 \begin{itemize}
-    \item ✓ Mixture of Experts architecture
+    \item ✓ 1000+ experts per MoE layer
+    \item ✓ Top-20 dynamic routing
     \item ✓ Uncertainty quantification (μ, σ)
-    \item ✓ 0.158\% voltage error \textbf{⭐}
-    \item ✓ Trained on KIT P065 (0°C)
+    \item ✓ 2-3× better than ensemble
+    \item ✓ Real-time capable
 \end{itemize}
 \end{bluebox}
 
@@ -172,17 +190,26 @@
 \textbf{Architecture:}
 \begin{itemize}
     \item \textbf{Input:} [Age, V, T, I₀, I\_next]
-    \item \textbf{Ensemble:} 10 networks
-    \item \textbf{Parameters:} 200K × 10 = 2M
-    \item \textbf{Max Horizon:} 75 steps
+    \item \textbf{Ensemble:} 10 independent networks
+    \item \textbf{Parameters:} 200K × 10 = 2M total
+    \item \textbf{Activation:} GELU
+    \item \textbf{Prediction Horizon:} 75 steps (150s)
+\end{itemize}
+
+\textbf{Performance:}
+\begin{itemize}
+    \item \textbf{Voltage MAPE}: 0.3-0.4\%
+    \item \textbf{Temperature MAE}: 0.8-1.2°C
+    \item \textbf{Inference Time}: ~200ms
+    \item \textbf{Win Rate}: 5.6\% (1/18 segments)
 \end{itemize}
 
 \textbf{Key Features:}
 \begin{itemize}
-    \item ✓ Autoregressive prediction
-    \item ✓ Uncertainty quantification
-    \item ✓ Robust to noise
+    \item ✓ Autoregressive step-by-step
     \item ✓ Median of 10 predictions
+    \item ✓ Robust to noise
+    \item ✓ Validation baseline
 \end{itemize}
 \end{bluebox}
 
@@ -206,22 +233,26 @@
 \begin{bluebox}[title=✨ Key Findings]
 \large
 
-\textbf{Transformer:}
+\textbf{Winner: MoE Transformer 🏆}
 \begin{itemize}
-    \item 4× faster inference
-    \item Longer horizon
+    \item \textbf{2-3× better accuracy}
+    \item 0.158\% vs 0.3-0.4\% voltage MAPE
+    \item 94.4\% win rate (17/18 segments)
+    \item Fastest inference (<50ms)
 \end{itemize}
 
-\textbf{Ensemble:}
+\textbf{Best Demonstrations:}
 \begin{itemize}
-    \item Uncertainty bounds
-    \item More robust
+    \item Index 35000: \textbf{85× better}
+    \item Index 45000: \textbf{157× better}
+    \item Index 10000: \textbf{37× better}
 \end{itemize}
 
-\textbf{Complementary:}
+\textbf{Why Two Models?}
 \begin{itemize}
-    \item Different AI strategies
     \item Cross-validation
+    \item Different AI strategies
+    \item Uncertainty comparison
 \end{itemize}
 \end{bluebox}
 
@@ -252,13 +283,22 @@ Steps & 150 & 75 \\
 
 \begin{orangebox}[title=🌐 Web Interface]
 \large
-\textbf{4 Interactive Tabs:}
+\textbf{5 Interactive Tabs:}
 \begin{enumerate}
-    \item ⚡ Transformer Predict
-    \item ⚖️ Model Comparison
-    \item 🔍 Compare vs Actual
-    \item 📊 Deep Ensemble
+    \item ⚡ Predict Mode (MoE Transformer)
+    \item 📊 Dataset Comparison \textbf{✨ NEW}
+    \item 🎯 Model Comparison
+    \item 📈 Compare vs Actual
+    \item 🔬 Ensemble Predict
 \end{enumerate}
+
+\textbf{Dataset Validation:}
+\begin{itemize}
+    \item Load segments from 1.1GB KIT CSV
+    \item Compare both models vs actual data
+    \item See winner with metrics
+    \item 8 pre-computed demos ready!
+\end{itemize}
 
 \textbf{Live Demo Available!}
 \end{orangebox}
@@ -326,12 +366,12 @@ Steps & 150 & 75 \\
 
 \begin{multicols}{3}
 \begin{itemize}
-    \item ✅ Dual AI architecture
-    \item ✅ Web interface
+    \item ✅ MoE architecture (0.158\% MAPE)
+    \item ✅ 94.4\% win rate validation
+    \item ✅ Real dataset comparison
+    \item ✅ 5-tab web interface
+    \item ✅ 8 pre-computed demos
     \item ✅ Uncertainty quantification
-    \item ✅ Edge-deployable
-    \item ✅ Model comparison
-    \item ✅ Adaptive learning
 \end{itemize}
 \end{multicols}
 
@@ -341,17 +381,20 @@ Steps & 150 & 75 \\
 \textbf{📚 Dataset}\\
 KIT P065 Cell\\
 0°C, 10-100\% SOC\\
-Nature Sci. Data 2024
+Nature Sci. Data 2024\\
+doi: s41597-024-03831-x
 
 \columnbreak
 
 \textbf{🔧 Tech Stack}\\
 Python, PyTorch, Flask\\
-HTML5, JavaScript, Chart.js
+HTML5, JavaScript, Chart.js\\
+Pandas (1.1GB CSV loading)
 
 \columnbreak
 
 \textbf{📧 Contact \& Code}\\
+guda.reddy@iitgn.ac.in\\
 GitHub: Avinash143-ay\\
 \qrcode[height=1.5cm]{https://github.com/Avinash143-ay/digitial_twin-battery}
 
