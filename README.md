@@ -49,7 +49,6 @@ Both models are trained on the **same challenging dataset**:
 ├── find_good_segments.py         # Scan dataset for demo segments ✨ NEW
 ├── load_saved_segment.py         # Quick loader for saved predictions ✨ NEW
 ├── start_server.bat              # Quick start script (Windows)
-├── POSTER_A0_BATTERY_DIGITAL_TWIN.md  # A0 poster content
 ├── MODEL_EXPLANATION.md          # Detailed model documentation
 └── requirements.txt              # Python dependencies
 ```
