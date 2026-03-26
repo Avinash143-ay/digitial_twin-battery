@@ -22,7 +22,7 @@ KIT_BLOCK_SIZE = 500
 KIT_TRAIN_BLOCK_SIZE = 300
 KIT_VAL_BLOCK_SIZE = 100
 KIT_TEST_BLOCK_SIZE = 100
-ENABLE_ENSEMBLE_QUANTIZATION = os.environ.get('ENABLE_ENSEMBLE_QUANTIZATION', '0') == '1'
+ENSEMBLE_QUANTIZATION_ENABLED = os.environ.get('ENABLE_ENSEMBLE_QUANTIZATION', '0') == '1'
 
 # Define the DeepEnsemble model architecture
 class BaseModel(nn.Module):
@@ -447,6 +447,7 @@ print("Loading DeepEnsemble model...")
 ensemble_model = DeepEnsemble(num_models=10)
 ensemble_inference_model = ensemble_model
 ensemble_inference_mode = 'fp32'
+ensemble_quantization_lock = threading.Lock()
 
 
 def build_quantized_ensemble_model(base_model):
@@ -462,7 +463,7 @@ def build_quantized_ensemble_model(base_model):
 def refresh_ensemble_inference_model():
     global ensemble_inference_model, ensemble_inference_mode
 
-    if ENABLE_ENSEMBLE_QUANTIZATION:
+    if ENSEMBLE_QUANTIZATION_ENABLED:
         try:
             ensemble_inference_model = build_quantized_ensemble_model(ensemble_model)
             ensemble_inference_mode = 'int8_dynamic'
@@ -1101,7 +1102,7 @@ def predict_ensemble():
             'temperature_ensemble': temp_predictions_all,
             'inference_mode': {
                 'ensemble': ensemble_inference_mode,
-                'ensemble_quantization_enabled': ENABLE_ENSEMBLE_QUANTIZATION
+                'ensemble_quantization_enabled': ENSEMBLE_QUANTIZATION_ENABLED
             },
             'parameters': {
                 'relative_age': relative_age,
@@ -1358,7 +1359,7 @@ def compare_with_dataset():
             },
             'inference_mode': {
                 'ensemble': ensemble_inference_mode,
-                'ensemble_quantization_enabled': ENABLE_ENSEMBLE_QUANTIZATION
+                'ensemble_quantization_enabled': ENSEMBLE_QUANTIZATION_ENABLED
             },
             'data_split': {
                 'strategy': f'block_{KIT_BLOCK_SIZE}_train_{KIT_TRAIN_BLOCK_SIZE}_val_{KIT_VAL_BLOCK_SIZE}_test_{KIT_TEST_BLOCK_SIZE}',
@@ -1613,13 +1614,53 @@ def training_status():
     })
 
 
+@app.route('/quantization_config', methods=['POST'])
+def quantization_config():
+    global ENSEMBLE_QUANTIZATION_ENABLED
+
+    try:
+        data = request.json or {}
+        enabled_raw = data.get('enabled')
+
+        if isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        elif isinstance(enabled_raw, (int, float)):
+            enabled = bool(int(enabled_raw))
+        elif isinstance(enabled_raw, str):
+            normalized = enabled_raw.strip().lower()
+            if normalized in ('1', 'true', 'yes', 'on'):
+                enabled = True
+            elif normalized in ('0', 'false', 'no', 'off'):
+                enabled = False
+            else:
+                raise ValueError('enabled string must be one of true/false, 1/0, yes/no, on/off')
+        else:
+            raise ValueError('enabled is required and must be bool/int/str')
+
+        with ensemble_quantization_lock:
+            ENSEMBLE_QUANTIZATION_ENABLED = enabled
+            refresh_ensemble_inference_model()
+
+        return jsonify({
+            'status': 'success',
+            'ensemble_quantization_enabled': ENSEMBLE_QUANTIZATION_ENABLED,
+            'ensemble_inference_mode': ensemble_inference_mode,
+            'message': f"Ensemble quantization {'enabled' if ENSEMBLE_QUANTIZATION_ENABLED else 'disabled'}."
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
+
+
 @app.route('/quantization_info', methods=['GET'])
 def quantization_info():
     return jsonify({
         'status': 'success',
-        'ensemble_quantization_enabled': ENABLE_ENSEMBLE_QUANTIZATION,
+        'ensemble_quantization_enabled': ENSEMBLE_QUANTIZATION_ENABLED,
         'ensemble_inference_mode': ensemble_inference_mode,
-        'recommendation': 'Set ENABLE_ENSEMBLE_QUANTIZATION=0 to force fp32 inference.'
+        'recommendation': 'Use POST /quantization_config with {"enabled": true|false} for runtime switching.'
     })
 
 

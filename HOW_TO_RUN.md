@@ -40,5 +40,8 @@ Quantization (DeepEnsemble inference):
 	$env:ENABLE_ENSEMBLE_QUANTIZATION = "1"
 3) Check quantization status endpoint:
 	Invoke-RestMethod -Method Get -Uri "http://localhost:5000/quantization_info"
-4) Benchmark fp32 vs int8 locally:
+4) Toggle quantization at runtime (no restart needed):
+	Invoke-RestMethod -Method Post -Uri "http://localhost:5000/quantization_config" -ContentType "application/json" -Body '{"enabled": true}'
+	Invoke-RestMethod -Method Post -Uri "http://localhost:5000/quantization_config" -ContentType "application/json" -Body '{"enabled": false}'
+5) Benchmark fp32 vs int8 locally:
 	cd "c:\Users\GUDA AVINASH REDDY\Downloads\batteries\untitled folder"; python benchmark_quantization.py
