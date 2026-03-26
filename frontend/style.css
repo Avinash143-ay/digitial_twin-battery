@@ -130,6 +130,70 @@ h4,
   border-bottom: 2px solid var(--border);
 }
 
+.perf-card {
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+}
+
+.perf-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.perf-header h2 {
+  margin: 0;
+  color: var(--accent);
+  font-size: 22px;
+}
+
+.perf-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.perf-item {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.perf-label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.perf-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.perf-actions .generate-btn,
+.perf-actions .ghost {
+  margin-top: 0;
+}
+
+.perf-hint {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .tab-btn {
   padding: 12px 24px;
   background: transparent;

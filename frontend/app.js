@@ -29,6 +29,84 @@ const API_BASE = isLocalHost || isFileProtocol ? "http://localhost:5000" : "";
 
 const apiUrl = (path) => `${API_BASE}${path}`;
 
+const quantizationModeText = document.getElementById("quantizationModeText");
+const quantizationEnabledText = document.getElementById("quantizationEnabledText");
+const quantizationHint = document.getElementById("quantizationHint");
+const quantizationEnableBtn = document.getElementById("quantizationEnableBtn");
+const quantizationDisableBtn = document.getElementById("quantizationDisableBtn");
+const quantizationRefreshBtn = document.getElementById("quantizationRefreshBtn");
+
+const setQuantizationUiLoading = (loading) => {
+  quantizationEnableBtn.disabled = loading;
+  quantizationDisableBtn.disabled = loading;
+  quantizationRefreshBtn.disabled = loading;
+};
+
+const renderQuantizationInfo = (info) => {
+  const mode = info?.ensemble_inference_mode || "unknown";
+  const enabled = Boolean(info?.ensemble_quantization_enabled);
+
+  quantizationModeText.textContent = mode === "int8_dynamic" ? "INT8 Dynamic" : "FP32";
+  quantizationEnabledText.textContent = enabled ? "Yes" : "No";
+  quantizationHint.textContent = enabled
+    ? "INT8 mode is active for ensemble inference."
+    : "FP32 mode is active for ensemble inference.";
+
+  quantizationEnableBtn.disabled = enabled;
+  quantizationDisableBtn.disabled = !enabled;
+};
+
+const fetchQuantizationInfo = async () => {
+  try {
+    const response = await fetch(apiUrl('/quantization_info'));
+    if (!response.ok) {
+      throw new Error('Unable to fetch quantization status');
+    }
+    const result = await response.json();
+    if (result.status !== 'success') {
+      throw new Error(result.message || 'Quantization status unavailable');
+    }
+    renderQuantizationInfo(result);
+  } catch (error) {
+    quantizationModeText.textContent = "Unavailable";
+    quantizationEnabledText.textContent = "Unavailable";
+    quantizationHint.textContent = `Could not reach backend: ${error.message}`;
+  }
+};
+
+const setQuantizationEnabled = async (enabled) => {
+  setQuantizationUiLoading(true);
+  try {
+    const response = await fetch(apiUrl('/quantization_config'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+
+    const result = await response.json();
+    if (!response.ok || result.status !== 'success') {
+      throw new Error(result.message || 'Failed to update quantization mode');
+    }
+
+    renderQuantizationInfo(result);
+    updateStatus(
+      enabled ? 'INT8 quantization enabled for ensemble inference' : 'FP32 mode enabled for ensemble inference',
+      'loaded'
+    );
+  } catch (error) {
+    quantizationHint.textContent = `Update failed: ${error.message}`;
+    updateStatus(`Quantization update failed: ${error.message}`, 'ready');
+  } finally {
+    setQuantizationUiLoading(false);
+  }
+};
+
+quantizationEnableBtn.addEventListener('click', () => setQuantizationEnabled(true));
+quantizationDisableBtn.addEventListener('click', () => setQuantizationEnabled(false));
+quantizationRefreshBtn.addEventListener('click', fetchQuantizationInfo);
+
+fetchQuantizationInfo();
+
 // Separate chart instances for each tab
 let predictVoltageChart;
 let predictTemperatureChart;

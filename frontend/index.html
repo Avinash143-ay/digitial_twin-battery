@@ -23,6 +23,31 @@
         <span id="statusText">Ready - Select a mode to begin</span>
       </div>
 
+      <section class="card perf-card" id="perfModeCard">
+        <div class="perf-header">
+          <div>
+            <h2>Performance Mode</h2>
+            <p>Switch model runtime mode without terminal commands.</p>
+          </div>
+          <button id="quantizationRefreshBtn" class="ghost">Refresh</button>
+        </div>
+        <div class="perf-grid">
+          <div class="perf-item">
+            <span class="perf-label">Current Mode</span>
+            <strong id="quantizationModeText">Checking...</strong>
+          </div>
+          <div class="perf-item">
+            <span class="perf-label">Quantization Enabled</span>
+            <strong id="quantizationEnabledText">Checking...</strong>
+          </div>
+          <div class="perf-item perf-actions">
+            <button id="quantizationEnableBtn" class="generate-btn">Enable INT8 Mode</button>
+            <button id="quantizationDisableBtn" class="ghost">Use FP32 Mode</button>
+          </div>
+        </div>
+        <p id="quantizationHint" class="perf-hint">This setting applies immediately to ensemble inference.</p>
+      </section>
+
       <!-- Tab Navigation -->
       <div class="tabs">
         <button class="tab-btn active" data-tab="predict">🔮 Predict Mode</button>
