@@ -33,3 +33,12 @@ Quick correctness check with test CSV:
 5) Click Evaluate vs Actual.
 6) Verify charts show Actual vs MoE vs Ensemble and summary shows MAPE/MAE values.
 7) If threshold exceeded, queue and tune from the same panel.
+
+Quantization (DeepEnsemble inference):
+1) Quantization is optional (dynamic int8 on Linear layers).
+2) To enable quantized inference, set environment variable before starting backend:
+	$env:ENABLE_ENSEMBLE_QUANTIZATION = "1"
+3) Check quantization status endpoint:
+	Invoke-RestMethod -Method Get -Uri "http://localhost:5000/quantization_info"
+4) Benchmark fp32 vs int8 locally:
+	cd "c:\Users\GUDA AVINASH REDDY\Downloads\batteries\untitled folder"; python benchmark_quantization.py

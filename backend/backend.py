@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ KIT_BLOCK_SIZE = 500
 KIT_TRAIN_BLOCK_SIZE = 300
 KIT_VAL_BLOCK_SIZE = 100
 KIT_TEST_BLOCK_SIZE = 100
+ENABLE_ENSEMBLE_QUANTIZATION = os.environ.get('ENABLE_ENSEMBLE_QUANTIZATION', '0') == '1'
 
 # Define the DeepEnsemble model architecture
 class BaseModel(nn.Module):
@@ -443,6 +445,38 @@ except Exception as e:
 # Initialize and load the DeepEnsemble model
 print("Loading DeepEnsemble model...")
 ensemble_model = DeepEnsemble(num_models=10)
+ensemble_inference_model = ensemble_model
+ensemble_inference_mode = 'fp32'
+
+
+def build_quantized_ensemble_model(base_model):
+    quantized_model = torch.quantization.quantize_dynamic(
+        copy.deepcopy(base_model),
+        {nn.Linear},
+        dtype=torch.qint8
+    )
+    quantized_model.eval()
+    return quantized_model
+
+
+def refresh_ensemble_inference_model():
+    global ensemble_inference_model, ensemble_inference_mode
+
+    if ENABLE_ENSEMBLE_QUANTIZATION:
+        try:
+            ensemble_inference_model = build_quantized_ensemble_model(ensemble_model)
+            ensemble_inference_mode = 'int8_dynamic'
+            print('DeepEnsemble inference quantization enabled (dynamic int8).')
+            return
+        except Exception as e:
+            print(f"Warning: Could not quantize DeepEnsemble for inference: {e}")
+
+    ensemble_inference_model = ensemble_model
+    ensemble_inference_mode = 'fp32'
+
+
+def get_active_ensemble_model():
+    return ensemble_inference_model
 
 try:
     ensemble_path = os.path.join(script_dir, '..', 'models', 'digital_twin_simpler.pt')
@@ -457,6 +491,8 @@ except Exception as e:
     print(f"Warning: Could not load DeepEnsemble model weights: {e}")
     print("Using untrained ensemble for demonstration purposes.")
     ensemble_model.eval()
+
+refresh_ensemble_inference_model()
 
 device = torch.device("cpu")
 
@@ -889,6 +925,7 @@ def training_worker(model_name, epochs=1, max_samples=50, lr=1e-4, tuning_mode='
             trained_samples, last_loss = train_ensemble_on_records(records, epochs=epochs, lr=lr)
             save_path = os.path.join(script_dir, '..', 'models', 'ensemble_finetuned.pt')
             torch.save({'state_dict': ensemble_model.state_dict(), 'updated_at': datetime.utcnow().isoformat() + 'Z'}, save_path)
+            refresh_ensemble_inference_model()
 
         if trained_samples == 0:
             update_training_state(
@@ -1001,6 +1038,8 @@ def predict_ensemble():
             current_data = current_data[:75]
             steps = 75
         
+        active_ensemble_model = get_active_ensemble_model()
+
         # Initialize predictions arrays
         voltage_predictions_all = [[] for _ in range(10)]  # 10 ensemble models
         temp_predictions_all = [[] for _ in range(10)]
@@ -1023,7 +1062,7 @@ def predict_ensemble():
             
             # Get ensemble predictions
             with torch.no_grad():
-                predictions = ensemble_model(initial_state, action)  # [num_models, batch, 2]
+                predictions = active_ensemble_model(initial_state, action)  # [num_models, batch, 2]
             
             # Store predictions from each model with voltage constraints
             for model_idx in range(10):
@@ -1060,6 +1099,10 @@ def predict_ensemble():
             'temperature_forecast': temp_median,
             'voltage_ensemble': voltage_predictions_all,
             'temperature_ensemble': temp_predictions_all,
+            'inference_mode': {
+                'ensemble': ensemble_inference_mode,
+                'ensemble_quantization_enabled': ENABLE_ENSEMBLE_QUANTIZATION
+            },
             'parameters': {
                 'relative_age': relative_age,
                 'initial_voltage': voltage,
@@ -1246,6 +1289,7 @@ def compare_with_dataset():
         moe_temp_forecast = moe_predictions[0, :, 1].cpu().numpy().tolist()
         
         # Run Deep Ensemble
+        active_ensemble_model = get_active_ensemble_model()
         voltage_predictions_all = [[] for _ in range(10)]
         temp_predictions_all = [[] for _ in range(10)]
         
@@ -1260,7 +1304,7 @@ def compare_with_dataset():
             action_ens = torch.tensor([[next_current]], dtype=torch.float32)
             
             with torch.no_grad():
-                predictions_ens = ensemble_model(initial_state_ens, action_ens)
+                predictions_ens = active_ensemble_model(initial_state_ens, action_ens)
             
             for m in range(10):
                 pred_voltage = predictions_ens[m, 0, 0].item()
@@ -1311,6 +1355,10 @@ def compare_with_dataset():
                 'soh': soh,
                 'relative_age': relative_age,
                 'current_profile': current_profile
+            },
+            'inference_mode': {
+                'ensemble': ensemble_inference_mode,
+                'ensemble_quantization_enabled': ENABLE_ENSEMBLE_QUANTIZATION
             },
             'data_split': {
                 'strategy': f'block_{KIT_BLOCK_SIZE}_train_{KIT_TRAIN_BLOCK_SIZE}_val_{KIT_VAL_BLOCK_SIZE}_test_{KIT_TEST_BLOCK_SIZE}',
@@ -1562,6 +1610,16 @@ def training_status():
     return jsonify({
         'status': 'success',
         'training': get_training_state_snapshot()
+    })
+
+
+@app.route('/quantization_info', methods=['GET'])
+def quantization_info():
+    return jsonify({
+        'status': 'success',
+        'ensemble_quantization_enabled': ENABLE_ENSEMBLE_QUANTIZATION,
+        'ensemble_inference_mode': ensemble_inference_mode,
+        'recommendation': 'Set ENABLE_ENSEMBLE_QUANTIZATION=0 to force fp32 inference.'
     })
 
 
