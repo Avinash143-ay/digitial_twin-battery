@@ -35,11 +35,21 @@ const quantizationHint = document.getElementById("quantizationHint");
 const quantizationEnableBtn = document.getElementById("quantizationEnableBtn");
 const quantizationDisableBtn = document.getElementById("quantizationDisableBtn");
 const quantizationRefreshBtn = document.getElementById("quantizationRefreshBtn");
+const loraModeText = document.getElementById("loraModeText");
+const loraLoadedText = document.getElementById("loraLoadedText");
+const loraHint = document.getElementById("loraHint");
+const loraMergeBtn = document.getElementById("loraMergeBtn");
+const loraUnmergeBtn = document.getElementById("loraUnmergeBtn");
 
 const setQuantizationUiLoading = (loading) => {
   quantizationEnableBtn.disabled = loading;
   quantizationDisableBtn.disabled = loading;
   quantizationRefreshBtn.disabled = loading;
+};
+
+const setLoraUiLoading = (loading) => {
+  loraMergeBtn.disabled = loading;
+  loraUnmergeBtn.disabled = loading;
 };
 
 const renderQuantizationInfo = (info) => {
@@ -74,6 +84,68 @@ const fetchQuantizationInfo = async () => {
   }
 };
 
+const renderLoraInfo = (info) => {
+  const loaded = Boolean(info?.adapter_loaded);
+  const merged = Boolean(info?.adapter_merged);
+  const count = Number(info?.adapter_modules || 0);
+
+  loraModeText.textContent = merged ? "Merged" : "Unmerged";
+  loraLoadedText.textContent = loaded ? `Yes (${count} modules)` : "No";
+  loraHint.textContent = loaded
+    ? (merged
+      ? "LoRA is merged into base weights for inference."
+      : "LoRA is active as separate adapters (trainable mode).")
+    : "No LoRA adapter loaded yet. Train/load adapter first.";
+
+  loraMergeBtn.disabled = !loaded || merged;
+  loraUnmergeBtn.disabled = !loaded || !merged;
+};
+
+const fetchLoraInfo = async () => {
+  try {
+    const response = await fetch(apiUrl('/moe_lora_info'));
+    if (!response.ok) {
+      throw new Error('Unable to fetch LoRA status');
+    }
+    const result = await response.json();
+    if (result.status !== 'success') {
+      throw new Error(result.message || 'LoRA status unavailable');
+    }
+    renderLoraInfo(result);
+  } catch (error) {
+    loraModeText.textContent = "Unavailable";
+    loraLoadedText.textContent = "Unavailable";
+    loraHint.textContent = `Could not reach backend: ${error.message}`;
+  }
+};
+
+const setLoraAction = async (action) => {
+  setLoraUiLoading(true);
+  try {
+    const response = await fetch(apiUrl('/moe_lora_config'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+
+    const result = await response.json();
+    if (!response.ok || result.status !== 'success') {
+      throw new Error(result.message || 'Failed to update LoRA mode');
+    }
+
+    renderLoraInfo(result);
+    updateStatus(
+      action === 'merge' ? 'LoRA merged for inference mode' : 'LoRA unmerged for training mode',
+      'loaded'
+    );
+  } catch (error) {
+    loraHint.textContent = `Update failed: ${error.message}`;
+    updateStatus(`LoRA update failed: ${error.message}`, 'ready');
+  } finally {
+    setLoraUiLoading(false);
+  }
+};
+
 const setQuantizationEnabled = async (enabled) => {
   setQuantizationUiLoading(true);
   try {
@@ -103,9 +175,18 @@ const setQuantizationEnabled = async (enabled) => {
 
 quantizationEnableBtn.addEventListener('click', () => setQuantizationEnabled(true));
 quantizationDisableBtn.addEventListener('click', () => setQuantizationEnabled(false));
-quantizationRefreshBtn.addEventListener('click', fetchQuantizationInfo);
+loraMergeBtn.addEventListener('click', () => setLoraAction('merge'));
+loraUnmergeBtn.addEventListener('click', () => setLoraAction('unmerge'));
+quantizationRefreshBtn.addEventListener('click', async () => {
+  setQuantizationUiLoading(true);
+  setLoraUiLoading(true);
+  await Promise.all([fetchQuantizationInfo(), fetchLoraInfo()]);
+  setQuantizationUiLoading(false);
+  setLoraUiLoading(false);
+});
 
 fetchQuantizationInfo();
+fetchLoraInfo();
 
 // Separate chart instances for each tab
 let predictVoltageChart;

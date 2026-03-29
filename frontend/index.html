@@ -44,8 +44,21 @@
             <button id="quantizationEnableBtn" class="generate-btn">Enable INT8 Mode</button>
             <button id="quantizationDisableBtn" class="ghost">Use FP32 Mode</button>
           </div>
+          <div class="perf-item">
+            <span class="perf-label">MoE LoRA Status</span>
+            <strong id="loraModeText">Checking...</strong>
+          </div>
+          <div class="perf-item">
+            <span class="perf-label">MoE LoRA Loaded</span>
+            <strong id="loraLoadedText">Checking...</strong>
+          </div>
+          <div class="perf-item perf-actions">
+            <button id="loraMergeBtn" class="generate-btn">Merge LoRA</button>
+            <button id="loraUnmergeBtn" class="ghost">Unmerge LoRA</button>
+          </div>
         </div>
         <p id="quantizationHint" class="perf-hint">This setting applies immediately to ensemble inference.</p>
+        <p id="loraHint" class="perf-hint">LoRA merge mode removes adapter overhead for inference.</p>
       </section>
 
       <!-- Tab Navigation -->
