@@ -293,12 +293,37 @@ class AdapterLinear(nn.Module):
 
         self.adapter_A = nn.Linear(base_layer.in_features, self.rank, bias=False)
         self.adapter_B = nn.Linear(self.rank, base_layer.out_features, bias=False)
+        self.merged = False
 
         nn.init.kaiming_uniform_(self.adapter_A.weight, a=np.sqrt(5))
         nn.init.zeros_(self.adapter_B.weight)
 
+    def _delta_weight(self):
+        # Equivalent merged adapter update for Linear: W + scale * (B @ A)
+        return torch.matmul(self.adapter_B.weight, self.adapter_A.weight)
+
+    def merge_adapter(self):
+        if self.merged:
+            return False
+        delta = self._delta_weight().to(self.base_layer.weight.dtype)
+        with torch.no_grad():
+            self.base_layer.weight.add_(self.scale * delta)
+        self.merged = True
+        return True
+
+    def unmerge_adapter(self):
+        if not self.merged:
+            return False
+        delta = self._delta_weight().to(self.base_layer.weight.dtype)
+        with torch.no_grad():
+            self.base_layer.weight.sub_(self.scale * delta)
+        self.merged = False
+        return True
+
     def forward(self, x):
         base_out = self.base_layer(x)
+        if self.merged:
+            return base_out
         delta = self.adapter_B(self.dropout(self.adapter_A(x)))
         return base_out + self.scale * delta
 
@@ -366,6 +391,39 @@ def get_moe_adapter_parameters(base_model):
             adapter_params.extend(list(module.adapter_A.parameters()))
             adapter_params.extend(list(module.adapter_B.parameters()))
     return adapter_params
+
+
+def iter_moe_adapter_modules(base_model):
+    for module in base_model.modules():
+        if isinstance(module, AdapterLinear):
+            yield module
+
+
+def count_moe_adapter_modules(base_model):
+    return sum(1 for _ in iter_moe_adapter_modules(base_model))
+
+
+def are_moe_adapters_merged(base_model):
+    adapter_modules = list(iter_moe_adapter_modules(base_model))
+    if not adapter_modules:
+        return False
+    return all(module.merged for module in adapter_modules)
+
+
+def merge_moe_adapters(base_model):
+    merged_count = 0
+    for module in iter_moe_adapter_modules(base_model):
+        if module.merge_adapter():
+            merged_count += 1
+    return merged_count
+
+
+def unmerge_moe_adapters(base_model):
+    unmerged_count = 0
+    for module in iter_moe_adapter_modules(base_model):
+        if module.unmerge_adapter():
+            unmerged_count += 1
+    return unmerged_count
 
 
 def save_moe_adapter_checkpoint(base_model, checkpoint_path, config):
@@ -498,6 +556,7 @@ refresh_ensemble_inference_model()
 device = torch.device("cpu")
 
 training_lock = threading.Lock()
+moe_adapter_lock = threading.Lock()
 training_state = {
     'running': False,
     'status': 'idle',
@@ -889,6 +948,12 @@ def training_worker(model_name, epochs=1, max_samples=50, lr=1e-4, tuning_mode='
 
         if model_name == 'moe':
             if tuning_mode == 'adapter':
+                restore_merged_after_training = False
+                with moe_adapter_lock:
+                    if are_moe_adapters_merged(model):
+                        unmerge_moe_adapters(model)
+                        restore_merged_after_training = True
+
                 trained_samples, last_loss, trainable_params = train_moe_adapter_on_records(
                     records,
                     epochs=epochs,
@@ -909,6 +974,10 @@ def training_worker(model_name, epochs=1, max_samples=50, lr=1e-4, tuning_mode='
                 save_path = MOE_ADAPTER_PATH
                 save_moe_adapter_checkpoint(model, save_path, moe_adapter_config)
                 update_training_state(trainable_parameters=trainable_params)
+
+                if restore_merged_after_training:
+                    with moe_adapter_lock:
+                        merge_moe_adapters(model)
             else:
                 trained_samples, last_loss = train_moe_on_records(records, epochs=epochs, lr=lr)
                 save_path = os.path.join(script_dir, '..', 'models', 'moe_finetuned.pt')
@@ -1612,6 +1681,71 @@ def training_status():
         'status': 'success',
         'training': get_training_state_snapshot()
     })
+
+
+@app.route('/moe_lora_info', methods=['GET'])
+def moe_lora_info():
+    adapter_count = count_moe_adapter_modules(model)
+    return jsonify({
+        'status': 'success',
+        'adapter_modules': adapter_count,
+        'adapter_checkpoint_path': MOE_ADAPTER_PATH,
+        'adapter_loaded': bool(adapter_count > 0),
+        'adapter_merged': bool(are_moe_adapters_merged(model)),
+        'message': 'Use POST /moe_lora_config with {"action":"merge"|"unmerge"} for runtime control.'
+    })
+
+
+@app.route('/moe_lora_config', methods=['POST'])
+def moe_lora_config():
+    try:
+        data = request.json or {}
+        action = str(data.get('action', '')).strip().lower()
+
+        if action not in ('merge', 'unmerge'):
+            return jsonify({
+                'status': 'error',
+                'message': 'action must be either "merge" or "unmerge"'
+            }), 400
+
+        state = get_training_state_snapshot()
+        if state.get('running'):
+            return jsonify({
+                'status': 'busy',
+                'message': 'Cannot change LoRA merge state while training is running.',
+                'training_state': state
+            }), 409
+
+        with moe_adapter_lock:
+            adapter_count = count_moe_adapter_modules(model)
+            if adapter_count == 0:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'No MoE adapter modules are loaded. Train/load adapter first.'
+                }), 400
+
+            if action == 'merge':
+                changed = merge_moe_adapters(model)
+            else:
+                changed = unmerge_moe_adapters(model)
+
+            merged_state = are_moe_adapters_merged(model)
+
+        model.eval()
+        return jsonify({
+            'status': 'success',
+            'action': action,
+            'changed_modules': int(changed),
+            'adapter_modules': int(adapter_count),
+            'adapter_merged': bool(merged_state),
+            'message': f'MoE LoRA adapters {"merged" if merged_state else "unmerged"}.'
+        })
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
 
 
 @app.route('/quantization_config', methods=['POST'])

@@ -45,3 +45,11 @@ Quantization (DeepEnsemble inference):
 	Invoke-RestMethod -Method Post -Uri "http://localhost:5000/quantization_config" -ContentType "application/json" -Body '{"enabled": false}'
 5) Benchmark fp32 vs int8 locally:
 	cd "c:\Users\GUDA AVINASH REDDY\Downloads\batteries\untitled folder"; python benchmark_quantization.py
+
+LoRA merge/unmerge (MoE adapter deployment):
+1) Check LoRA adapter status:
+	Invoke-RestMethod -Method Get -Uri "http://localhost:5000/moe_lora_info"
+2) Merge LoRA adapters into base weights (inference mode):
+	Invoke-RestMethod -Method Post -Uri "http://localhost:5000/moe_lora_config" -ContentType "application/json" -Body '{"action":"merge"}'
+3) Unmerge adapters (return to editable adapter mode):
+	Invoke-RestMethod -Method Post -Uri "http://localhost:5000/moe_lora_config" -ContentType "application/json" -Body '{"action":"unmerge"}'
