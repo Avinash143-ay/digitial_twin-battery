@@ -61,6 +61,66 @@
         <p id="loraHint" class="perf-hint">LoRA merge mode removes adapter overhead for inference.</p>
       </section>
 
+      <section class="card guide-card" id="userGuideCard">
+        <h2>How To Use This Dashboard</h2>
+        <p class="guide-intro">Use this section as a quick manual for normal users. No terminal commands are required.</p>
+
+        <details open>
+          <summary>1) What is Quantization?</summary>
+          <div class="guide-body">
+            <p><strong>Meaning:</strong> Quantization uses a lighter math mode (INT8) instead of full precision (FP32).</p>
+            <p><strong>Why:</strong> It can reduce memory and sometimes improve speed on certain hardware.</p>
+            <p><strong>Trade-off:</strong> May be slightly less accurate, and on some systems it can be slower.</p>
+            <p><strong>Recommended default:</strong> Keep FP32 unless your measurements show INT8 is better.</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>2) What is LoRA?</summary>
+          <div class="guide-body">
+            <p><strong>Meaning:</strong> LoRA is a lightweight way to adapt the model without retraining all weights.</p>
+            <p><strong>Why:</strong> Faster updates on new battery data and smaller adapter files.</p>
+            <p><strong>Merged:</strong> Best for deployment and inference.</p>
+            <p><strong>Unmerged:</strong> Best when you want to continue adapter training.</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>3) Quick Start For New Users</summary>
+          <div class="guide-body">
+            <ol>
+              <li>Go to Predict Mode or Compare Mode.</li>
+              <li>Upload CSV input data (or generate constant current).</li>
+              <li>Run prediction/evaluation and review charts.</li>
+              <li>Use Performance Mode only if you need optimization settings.</li>
+            </ol>
+          </div>
+        </details>
+
+        <details>
+          <summary>4) How To Use Performance Mode</summary>
+          <div class="guide-body">
+            <ol>
+              <li>Click Refresh to read current backend status.</li>
+              <li>For Quantization: Enable INT8 Mode or Use FP32 Mode.</li>
+              <li>For LoRA: Merge LoRA for deployment, Unmerge LoRA for adapter training.</li>
+              <li>After switching, run one prediction to confirm behavior.</li>
+            </ol>
+          </div>
+        </details>
+
+        <details>
+          <summary>5) Recommended Defaults (Production)</summary>
+          <div class="guide-body">
+            <ul>
+              <li>Quantization: FP32 (unless benchmark proves INT8 is faster on target machine).</li>
+              <li>LoRA: Merged (for clean and efficient inference).</li>
+              <li>If training adapters again: switch LoRA to Unmerged temporarily.</li>
+            </ul>
+          </div>
+        </details>
+      </section>
+
       <!-- Tab Navigation -->
       <div class="tabs">
         <button class="tab-btn active" data-tab="predict">🔮 Predict Mode</button>
