@@ -32,8 +32,9 @@ const apiUrl = (path) => `${API_BASE}${path}`;
 const quantizationModeText = document.getElementById("quantizationModeText");
 const quantizationEnabledText = document.getElementById("quantizationEnabledText");
 const quantizationHint = document.getElementById("quantizationHint");
-const quantizationEnableBtn = document.getElementById("quantizationEnableBtn");
-const quantizationDisableBtn = document.getElementById("quantizationDisableBtn");
+const modeFp32Btn = document.getElementById("modeFp32Btn");
+const modeFp16Btn = document.getElementById("modeFp16Btn");
+const modeInt8Btn = document.getElementById("modeInt8Btn");
 const quantizationRefreshBtn = document.getElementById("quantizationRefreshBtn");
 const loraModeText = document.getElementById("loraModeText");
 const loraLoadedText = document.getElementById("loraLoadedText");
@@ -41,9 +42,54 @@ const loraHint = document.getElementById("loraHint");
 const loraMergeBtn = document.getElementById("loraMergeBtn");
 const loraUnmergeBtn = document.getElementById("loraUnmergeBtn");
 
+const precisionFp32Status = document.getElementById("precisionFp32Status");
+const precisionFp16Status = document.getElementById("precisionFp16Status");
+const precisionInt8Status = document.getElementById("precisionInt8Status");
+const precisionLoraStatus = document.getElementById("precisionLoraStatus");
+const precisionHint = document.getElementById("precisionHint");
+const precisionRefreshBtn = document.getElementById("precisionRefreshBtn");
+
+let latestQuantizationInfo = null;
+let latestLoraInfo = null;
+
+const renderPrecisionComparison = () => {
+  if (!precisionFp32Status || !precisionFp16Status || !precisionInt8Status || !precisionLoraStatus || !precisionHint) {
+    return;
+  }
+
+  precisionFp32Status.textContent = "Available";
+  precisionFp16Status.textContent = "Available";
+
+  if (latestQuantizationInfo) {
+    const enabled = Boolean(latestQuantizationInfo.ensemble_quantization_enabled);
+    const mode = latestQuantizationInfo.ensemble_inference_mode || "unknown";
+    precisionInt8Status.textContent = mode === "int8_dynamic" ? `Enabled (${mode})` : "Available";
+    precisionFp32Status.textContent = mode === "fp32" ? "Active" : "Available";
+    precisionFp16Status.textContent = mode === "fp16" ? "Active" : "Available";
+
+    if (enabled && mode !== "int8_dynamic") {
+      precisionInt8Status.textContent = "Available";
+    }
+  } else {
+    precisionInt8Status.textContent = "Unavailable";
+    precisionFp16Status.textContent = "Unavailable";
+  }
+
+  if (latestLoraInfo) {
+    const loaded = Boolean(latestLoraInfo.adapter_loaded);
+    const merged = Boolean(latestLoraInfo.adapter_merged);
+    precisionLoraStatus.textContent = loaded ? (merged ? "Loaded + merged" : "Loaded + unmerged") : "Not loaded";
+  } else {
+    precisionLoraStatus.textContent = "Unavailable";
+  }
+
+  precisionHint.textContent = "FP32, FP16, and INT8 are controllable in website now. LoRA accuracy numbers will appear after dedicated benchmark runs.";
+};
+
 const setQuantizationUiLoading = (loading) => {
-  quantizationEnableBtn.disabled = loading;
-  quantizationDisableBtn.disabled = loading;
+  modeFp32Btn.disabled = loading;
+  modeFp16Btn.disabled = loading;
+  modeInt8Btn.disabled = loading;
   quantizationRefreshBtn.disabled = loading;
 };
 
@@ -54,16 +100,24 @@ const setLoraUiLoading = (loading) => {
 
 const renderQuantizationInfo = (info) => {
   const mode = info?.ensemble_inference_mode || "unknown";
-  const enabled = Boolean(info?.ensemble_quantization_enabled);
+  const enabled = mode === "int8_dynamic" || Boolean(info?.ensemble_quantization_enabled);
 
-  quantizationModeText.textContent = mode === "int8_dynamic" ? "INT8 Dynamic" : "FP32";
+  if (mode === "int8_dynamic") {
+    quantizationModeText.textContent = "INT8 Dynamic";
+  } else if (mode === "fp16") {
+    quantizationModeText.textContent = "FP16";
+  } else if (mode === "fp32") {
+    quantizationModeText.textContent = "FP32";
+  } else {
+    quantizationModeText.textContent = mode;
+  }
+
   quantizationEnabledText.textContent = enabled ? "Yes" : "No";
-  quantizationHint.textContent = enabled
-    ? "INT8 mode is active for ensemble inference."
-    : "FP32 mode is active for ensemble inference.";
+  quantizationHint.textContent = `Current ensemble runtime mode: ${quantizationModeText.textContent}.`;
 
-  quantizationEnableBtn.disabled = enabled;
-  quantizationDisableBtn.disabled = !enabled;
+  modeFp32Btn.disabled = mode === "fp32";
+  modeFp16Btn.disabled = mode === "fp16";
+  modeInt8Btn.disabled = mode === "int8_dynamic";
 };
 
 const fetchQuantizationInfo = async () => {
@@ -76,11 +130,15 @@ const fetchQuantizationInfo = async () => {
     if (result.status !== 'success') {
       throw new Error(result.message || 'Quantization status unavailable');
     }
+    latestQuantizationInfo = result;
     renderQuantizationInfo(result);
+    renderPrecisionComparison();
   } catch (error) {
     quantizationModeText.textContent = "Unavailable";
     quantizationEnabledText.textContent = "Unavailable";
     quantizationHint.textContent = `Could not reach backend: ${error.message}`;
+    latestQuantizationInfo = null;
+    renderPrecisionComparison();
   }
 };
 
@@ -111,11 +169,15 @@ const fetchLoraInfo = async () => {
     if (result.status !== 'success') {
       throw new Error(result.message || 'LoRA status unavailable');
     }
+    latestLoraInfo = result;
     renderLoraInfo(result);
+    renderPrecisionComparison();
   } catch (error) {
     loraModeText.textContent = "Unavailable";
     loraLoadedText.textContent = "Unavailable";
     loraHint.textContent = `Could not reach backend: ${error.message}`;
+    latestLoraInfo = null;
+    renderPrecisionComparison();
   }
 };
 
@@ -146,13 +208,13 @@ const setLoraAction = async (action) => {
   }
 };
 
-const setQuantizationEnabled = async (enabled) => {
+const setRuntimeMode = async (mode) => {
   setQuantizationUiLoading(true);
   try {
     const response = await fetch(apiUrl('/quantization_config'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled })
+      body: JSON.stringify({ mode })
     });
 
     const result = await response.json();
@@ -161,10 +223,7 @@ const setQuantizationEnabled = async (enabled) => {
     }
 
     renderQuantizationInfo(result);
-    updateStatus(
-      enabled ? 'INT8 quantization enabled for ensemble inference' : 'FP32 mode enabled for ensemble inference',
-      'loaded'
-    );
+    updateStatus(`Ensemble runtime mode switched to ${result.ensemble_inference_mode || mode}`, 'loaded');
   } catch (error) {
     quantizationHint.textContent = `Update failed: ${error.message}`;
     updateStatus(`Quantization update failed: ${error.message}`, 'ready');
@@ -173,8 +232,9 @@ const setQuantizationEnabled = async (enabled) => {
   }
 };
 
-quantizationEnableBtn.addEventListener('click', () => setQuantizationEnabled(true));
-quantizationDisableBtn.addEventListener('click', () => setQuantizationEnabled(false));
+modeFp32Btn.addEventListener('click', () => setRuntimeMode('fp32'));
+modeFp16Btn.addEventListener('click', () => setRuntimeMode('fp16'));
+modeInt8Btn.addEventListener('click', () => setRuntimeMode('int8_dynamic'));
 loraMergeBtn.addEventListener('click', () => setLoraAction('merge'));
 loraUnmergeBtn.addEventListener('click', () => setLoraAction('unmerge'));
 quantizationRefreshBtn.addEventListener('click', async () => {
@@ -185,8 +245,25 @@ quantizationRefreshBtn.addEventListener('click', async () => {
   setLoraUiLoading(false);
 });
 
+if (precisionRefreshBtn) {
+  precisionRefreshBtn.addEventListener('click', async () => {
+    setQuantizationUiLoading(true);
+    setLoraUiLoading(true);
+    if (precisionRefreshBtn) {
+      precisionRefreshBtn.disabled = true;
+    }
+    await Promise.all([fetchQuantizationInfo(), fetchLoraInfo()]);
+    setQuantizationUiLoading(false);
+    setLoraUiLoading(false);
+    if (precisionRefreshBtn) {
+      precisionRefreshBtn.disabled = false;
+    }
+  });
+}
+
 fetchQuantizationInfo();
 fetchLoraInfo();
+renderPrecisionComparison();
 
 // Separate chart instances for each tab
 let predictVoltageChart;

@@ -23,6 +23,10 @@ KIT_TRAIN_BLOCK_SIZE = 300
 KIT_VAL_BLOCK_SIZE = 100
 KIT_TEST_BLOCK_SIZE = 100
 ENSEMBLE_QUANTIZATION_ENABLED = os.environ.get('ENABLE_ENSEMBLE_QUANTIZATION', '0') == '1'
+ENSEMBLE_PRECISION_MODE = os.environ.get('ENSEMBLE_PRECISION_MODE', 'fp32').strip().lower()
+
+if ENSEMBLE_PRECISION_MODE not in ('fp32', 'fp16'):
+    ENSEMBLE_PRECISION_MODE = 'fp32'
 
 # Define the DeepEnsemble model architecture
 class BaseModel(nn.Module):
@@ -518,6 +522,13 @@ def build_quantized_ensemble_model(base_model):
     return quantized_model
 
 
+def build_fp16_ensemble_model(base_model):
+    fp16_model = copy.deepcopy(base_model)
+    fp16_model.half()
+    fp16_model.eval()
+    return fp16_model
+
+
 def refresh_ensemble_inference_model():
     global ensemble_inference_model, ensemble_inference_mode
 
@@ -530,12 +541,25 @@ def refresh_ensemble_inference_model():
         except Exception as e:
             print(f"Warning: Could not quantize DeepEnsemble for inference: {e}")
 
+    if ENSEMBLE_PRECISION_MODE == 'fp16':
+        try:
+            ensemble_inference_model = build_fp16_ensemble_model(ensemble_model)
+            ensemble_inference_mode = 'fp16'
+            print('DeepEnsemble inference precision set to fp16.')
+            return
+        except Exception as e:
+            print(f"Warning: Could not switch DeepEnsemble to fp16 for inference: {e}")
+
     ensemble_inference_model = ensemble_model
     ensemble_inference_mode = 'fp32'
 
 
 def get_active_ensemble_model():
     return ensemble_inference_model
+
+
+def get_active_ensemble_input_dtype():
+    return torch.float16 if ensemble_inference_mode == 'fp16' else torch.float32
 
 try:
     ensemble_path = os.path.join(script_dir, '..', 'models', 'digital_twin_simpler.pt')
@@ -1123,12 +1147,14 @@ def predict_ensemble():
         # Autoregressive prediction
         for step in range(steps):
             next_current = current_data[step]  # Current at next timestep
+
+            input_dtype = get_active_ensemble_input_dtype()
             
             # Prepare initial state: [relative_age, voltage, temp, current_at_t0]
             initial_state = torch.tensor([[current_age, current_voltage, current_temp, current_i]], 
-                                        dtype=torch.float32)
+                                        dtype=input_dtype)
             # Action is the next current (no negation - was wrong)
-            action = torch.tensor([[next_current]], dtype=torch.float32)
+            action = torch.tensor([[next_current]], dtype=input_dtype)
             
             # Get ensemble predictions
             with torch.no_grad():
@@ -1370,8 +1396,9 @@ def compare_with_dataset():
         
         for step in range(steps):
             next_current = current_profile[step]
-            initial_state_ens = torch.tensor([[current_age, current_voltage, current_temp, current_i]], dtype=torch.float32)
-            action_ens = torch.tensor([[next_current]], dtype=torch.float32)
+            input_dtype = get_active_ensemble_input_dtype()
+            initial_state_ens = torch.tensor([[current_age, current_voltage, current_temp, current_i]], dtype=input_dtype)
+            action_ens = torch.tensor([[next_current]], dtype=input_dtype)
             
             with torch.no_grad():
                 predictions_ens = active_ensemble_model(initial_state_ens, action_ens)
@@ -1750,36 +1777,64 @@ def moe_lora_config():
 
 @app.route('/quantization_config', methods=['POST'])
 def quantization_config():
-    global ENSEMBLE_QUANTIZATION_ENABLED
+    global ENSEMBLE_QUANTIZATION_ENABLED, ENSEMBLE_PRECISION_MODE
 
     try:
         data = request.json or {}
+        requested_mode_raw = data.get('mode')
         enabled_raw = data.get('enabled')
 
-        if isinstance(enabled_raw, bool):
-            enabled = enabled_raw
-        elif isinstance(enabled_raw, (int, float)):
-            enabled = bool(int(enabled_raw))
-        elif isinstance(enabled_raw, str):
-            normalized = enabled_raw.strip().lower()
-            if normalized in ('1', 'true', 'yes', 'on'):
-                enabled = True
-            elif normalized in ('0', 'false', 'no', 'off'):
-                enabled = False
+        normalized_mode = None
+        if requested_mode_raw is not None:
+            normalized_mode = str(requested_mode_raw).strip().lower()
+            if normalized_mode not in ('fp32', 'fp16', 'int8', 'int8_dynamic'):
+                raise ValueError('mode must be one of fp32, fp16, int8, int8_dynamic')
+
+        enabled = None
+        if enabled_raw is not None:
+            if isinstance(enabled_raw, bool):
+                enabled = enabled_raw
+            elif isinstance(enabled_raw, (int, float)):
+                enabled = bool(int(enabled_raw))
+            elif isinstance(enabled_raw, str):
+                normalized = enabled_raw.strip().lower()
+                if normalized in ('1', 'true', 'yes', 'on'):
+                    enabled = True
+                elif normalized in ('0', 'false', 'no', 'off'):
+                    enabled = False
+                else:
+                    raise ValueError('enabled string must be one of true/false, 1/0, yes/no, on/off')
             else:
-                raise ValueError('enabled string must be one of true/false, 1/0, yes/no, on/off')
-        else:
-            raise ValueError('enabled is required and must be bool/int/str')
+                raise ValueError('enabled must be bool/int/str when provided')
 
         with ensemble_quantization_lock:
-            ENSEMBLE_QUANTIZATION_ENABLED = enabled
+            if normalized_mode in ('int8', 'int8_dynamic'):
+                ENSEMBLE_QUANTIZATION_ENABLED = True
+                ENSEMBLE_PRECISION_MODE = 'fp32'
+            elif normalized_mode == 'fp16':
+                ENSEMBLE_QUANTIZATION_ENABLED = False
+                ENSEMBLE_PRECISION_MODE = 'fp16'
+            elif normalized_mode == 'fp32':
+                ENSEMBLE_QUANTIZATION_ENABLED = False
+                ENSEMBLE_PRECISION_MODE = 'fp32'
+            elif enabled is not None:
+                ENSEMBLE_QUANTIZATION_ENABLED = enabled
+                if ENSEMBLE_QUANTIZATION_ENABLED:
+                    ENSEMBLE_PRECISION_MODE = 'fp32'
+                elif ENSEMBLE_PRECISION_MODE not in ('fp32', 'fp16'):
+                    ENSEMBLE_PRECISION_MODE = 'fp32'
+            else:
+                raise ValueError('provide either mode or enabled')
+
             refresh_ensemble_inference_model()
 
         return jsonify({
             'status': 'success',
             'ensemble_quantization_enabled': ENSEMBLE_QUANTIZATION_ENABLED,
+            'ensemble_precision_mode': ENSEMBLE_PRECISION_MODE,
             'ensemble_inference_mode': ensemble_inference_mode,
-            'message': f"Ensemble quantization {'enabled' if ENSEMBLE_QUANTIZATION_ENABLED else 'disabled'}."
+            'available_modes': ['fp32', 'fp16', 'int8_dynamic'],
+            'message': f'Ensemble runtime mode set to {ensemble_inference_mode}.'
         })
     except Exception as e:
         return jsonify({
@@ -1793,8 +1848,10 @@ def quantization_info():
     return jsonify({
         'status': 'success',
         'ensemble_quantization_enabled': ENSEMBLE_QUANTIZATION_ENABLED,
+        'ensemble_precision_mode': ENSEMBLE_PRECISION_MODE,
         'ensemble_inference_mode': ensemble_inference_mode,
-        'recommendation': 'Use POST /quantization_config with {"enabled": true|false} for runtime switching.'
+        'available_modes': ['fp32', 'fp16', 'int8_dynamic'],
+        'recommendation': 'Use POST /quantization_config with {"mode": "fp32"|"fp16"|"int8_dynamic"}.'
     })
 
 

@@ -194,6 +194,54 @@ h4,
   font-size: 13px;
 }
 
+.precision-card {
+  border: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.precision-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.precision-header h2 {
+  margin: 0;
+  font-size: 22px;
+  color: var(--text);
+}
+
+.precision-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.precision-table-wrap {
+  overflow-x: auto;
+}
+
+.precision-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.precision-table th,
+.precision-table td {
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.precision-table th {
+  background: #f8fafc;
+  font-weight: 700;
+  color: #1e293b;
+}
+
 .guide-card {
   border: 1px solid var(--border);
   background: #ffffff;

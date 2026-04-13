@@ -41,8 +41,9 @@
             <strong id="quantizationEnabledText">Checking...</strong>
           </div>
           <div class="perf-item perf-actions">
-            <button id="quantizationEnableBtn" class="generate-btn">Enable INT8 Mode</button>
-            <button id="quantizationDisableBtn" class="ghost">Use FP32 Mode</button>
+            <button id="modeFp32Btn" class="ghost">Use FP32 Mode</button>
+            <button id="modeFp16Btn" class="ghost">Use FP16 Mode</button>
+            <button id="modeInt8Btn" class="generate-btn">Enable INT8 Mode</button>
           </div>
           <div class="perf-item">
             <span class="perf-label">MoE LoRA Status</span>
@@ -59,6 +60,57 @@
         </div>
         <p id="quantizationHint" class="perf-hint">This setting applies immediately to ensemble inference.</p>
         <p id="loraHint" class="perf-hint">LoRA merge mode removes adapter overhead for inference.</p>
+      </section>
+
+      <section class="card precision-card" id="precisionCompareCard">
+        <div class="precision-header">
+          <div>
+            <h2>Model Precision and LoRA Comparison</h2>
+            <p>Runtime view in website. FP32, FP16, and INT8 are available modes.</p>
+          </div>
+          <button id="precisionRefreshBtn" class="ghost">Refresh</button>
+        </div>
+
+        <div class="precision-table-wrap">
+          <table class="precision-table">
+            <thead>
+              <tr>
+                <th>Mode</th>
+                <th>Voltage MAPE (%)</th>
+                <th>Temp MAE</th>
+                <th>Website Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>FP32 (baseline)</td>
+                <td id="precisionFp32Mape">0.4065</td>
+                <td id="precisionFp32Mae">0.0376</td>
+                <td id="precisionFp32Status">Available</td>
+              </tr>
+              <tr>
+                <td>INT8 (dynamic quant.)</td>
+                <td id="precisionInt8Mape">Pending benchmark</td>
+                <td id="precisionInt8Mae">Pending benchmark</td>
+                <td id="precisionInt8Status">Checking...</td>
+              </tr>
+              <tr>
+                <td>FP16</td>
+                <td id="precisionFp16Mape">Pending benchmark</td>
+                <td id="precisionFp16Mae">Pending benchmark</td>
+                <td id="precisionFp16Status">Checking...</td>
+              </tr>
+              <tr>
+                <td>MoE + LoRA fine-tuned</td>
+                <td id="precisionLoraMape">Coming soon</td>
+                <td id="precisionLoraMae">Coming soon</td>
+                <td id="precisionLoraStatus">Checking...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p id="precisionHint" class="perf-hint">Use Refresh after changing quantization or LoRA mode.</p>
       </section>
 
       <section class="card guide-card" id="userGuideCard">
