@@ -1638,6 +1638,9 @@ document.getElementById("ensembleDownloadTemperature").addEventListener("click",
 // MODEL COMPARISON TAB FUNCTIONALITY
 // ================================
 
+const mcCompareBtn = document.getElementById('mcCompareBtn');
+if (mcCompareBtn) {
+
 let mcCurrentData = null;
 let mcVoltageChart = null;
 let mcTemperatureChart = null;
@@ -1801,7 +1804,7 @@ const avgVoltageDiff = voltageDiff.reduce((a, b) => a + b, 0) / voltageDiff.leng
   }
 };
 
-document.getElementById('mcCompareBtn').addEventListener('click', compareModels);
+mcCompareBtn.addEventListener('click', compareModels);
 
 // Create comparison chart with both model predictions
 const createComparisonChart = (ctx, labels, transformerData, ensembleData, title) => {
@@ -1895,6 +1898,8 @@ document.getElementById("mcDownloadTemperature").addEventListener("click", () =>
   link.download = "model-comparison-temperature.png";
   link.click();
 });
+
+}
 
 // DATASET COMPARISON FUNCTIONALITY
 let datasetVoltageChart, datasetTemperatureChart;

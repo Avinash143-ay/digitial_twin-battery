@@ -62,57 +62,6 @@
         <p id="loraHint" class="perf-hint">LoRA merge mode removes adapter overhead for inference.</p>
       </section>
 
-      <section class="card precision-card" id="precisionCompareCard">
-        <div class="precision-header">
-          <div>
-            <h2>Model Precision and LoRA Comparison</h2>
-            <p>Runtime view in website. FP32, FP16, and INT8 are available modes.</p>
-          </div>
-          <button id="precisionRefreshBtn" class="ghost">Refresh</button>
-        </div>
-
-        <div class="precision-table-wrap">
-          <table class="precision-table">
-            <thead>
-              <tr>
-                <th>Mode</th>
-                <th>Voltage MAPE (%)</th>
-                <th>Temp MAE</th>
-                <th>Website Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>FP32 (baseline)</td>
-                <td id="precisionFp32Mape">0.4065</td>
-                <td id="precisionFp32Mae">0.0376</td>
-                <td id="precisionFp32Status">Available</td>
-              </tr>
-              <tr>
-                <td>INT8 (dynamic quant.)</td>
-                <td id="precisionInt8Mape">Pending benchmark</td>
-                <td id="precisionInt8Mae">Pending benchmark</td>
-                <td id="precisionInt8Status">Checking...</td>
-              </tr>
-              <tr>
-                <td>FP16</td>
-                <td id="precisionFp16Mape">Pending benchmark</td>
-                <td id="precisionFp16Mae">Pending benchmark</td>
-                <td id="precisionFp16Status">Checking...</td>
-              </tr>
-              <tr>
-                <td>MoE + LoRA fine-tuned</td>
-                <td id="precisionLoraMape">Coming soon</td>
-                <td id="precisionLoraMae">Coming soon</td>
-                <td id="precisionLoraStatus">Checking...</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <p id="precisionHint" class="perf-hint">Use Refresh after changing quantization or LoRA mode.</p>
-      </section>
-
       <section class="card guide-card" id="userGuideCard">
         <h2>How To Use This Dashboard</h2>
         <p class="guide-intro">Use this section as a quick manual for normal users. No terminal commands are required.</p>
@@ -177,7 +126,6 @@
       <div class="tabs">
         <button class="tab-btn active" data-tab="predict">🔮 Predict Mode</button>
         <button class="tab-btn" data-tab="datasetCompare">📈 Dataset Comparison</button>
-        <button class="tab-btn" data-tab="modelCompare">⚖️ Model Comparison</button>
         <button class="tab-btn" data-tab="compare">📊 Compare Mode</button>
         <button class="tab-btn" data-tab="ensemble">🎯 Ensemble Predict</button>
       </div>
@@ -361,139 +309,6 @@
           </div>
           <div class="chart-wrap">
             <canvas id="datasetTemperatureChart"></canvas>
-          </div>
-        </section>
-      </div>
-
-      <!-- Model Comparison Tab -->
-      <div id="modelCompareTab" class="tab-content">
-        <section class="card prediction-card">
-          <h2>⚖️ Compare Transformer vs DeepEnsemble</h2>
-          <p>Run both models on the same input and see which performs better</p>
-          
-          <div class="param-grid">
-            <div class="param-group">
-              <label for="mcSOH">State of Health (SOH)</label>
-              <input type="number" id="mcSOH" min="0" max="1" step="0.01" value="0.95" />
-              <small>Range: 0.0 - 1.0</small>
-            </div>
-            <div class="param-group">
-              <label for="mcVoltage">Initial Voltage (V)</label>
-              <input type="number" id="mcVoltage" min="3.2" max="4.2" step="0.01" value="3.7" />
-              <small>Range: 3.2 - 4.2 V</small>
-            </div>
-            <div class="param-group">
-              <label for="mcTemperature">Initial Temperature (°C)</label>
-              <input type="number" id="mcTemperature" min="0" max="60" step="0.1" value="28" />
-              <small>Typical: 25 - 35°C</small>
-            </div>
-          </div>
-
-          <div class="upload-section">
-            <h3>Current Profile</h3>
-            <div class="current-mode-selector">
-              <label class="radio-option">
-                <input type="radio" name="mcCurrentMode" value="constant" checked />
-                <span>Constant Current</span>
-              </label>
-              <label class="radio-option">
-                <input type="radio" name="mcCurrentMode" value="csv" />
-                <span>Upload CSV</span>
-              </label>
-            </div>
-
-            <div id="mcConstantCurrentSection" class="current-section">
-              <div class="param-grid">
-                <div class="param-group">
-                  <label for="mcConstantCurrent">Current Value (A)</label>
-                  <input type="number" id="mcConstantCurrent" min="-1.5" max="1.5" step="0.1" value="1.0" />
-                  <small>-1.5 to 1.5 A (+ = discharge)</small>
-                </div>
-                <div class="param-group">
-                  <label for="mcCurrentSteps">Duration (steps)</label>
-                  <input type="number" id="mcCurrentSteps" min="10" max="75" step="5" value="50" />
-                  <small>Max 75 steps (ensemble limit)</small>
-                </div>
-              </div>
-              <button id="mcGenerateCurrentBtn" class="generate-btn">Generate Current Profile</button>
-            </div>
-
-            <div id="mcCSVCurrentSection" class="current-section" style="display: none;">
-              <label class="upload-area">
-                <input id="mcCurrentInput" type="file" accept=".csv,text/csv" />
-                <div class="upload-content">
-                  <span class="upload-icon">📁</span>
-                  <span class="upload-text">Upload Current CSV</span>
-                </div>
-              </label>
-            </div>
-
-            <div id="mcCurrentInfo" class="info-box">
-              <span id="mcCurrentInfoText"></span>
-            </div>
-          </div>
-
-          <button id="mcCompareBtn" class="predict-btn" disabled>🚀 Compare Both Models</button>
-        </section>
-
-        <section class="card">
-          <h3>📊 Comparison Results</h3>
-          <div id="mcResults" style="display: none;">
-            <div style="margin-bottom: 20px; padding: 15px; background: #f3f4f6; border-radius: 8px;">
-              <h4 style="margin: 0 0 10px;">Voltage Prediction Accuracy</h4>
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                <div style="padding: 10px; background: white; border-radius: 6px;">
-                  <strong>🔮 Transformer:</strong>
-                  <div id="mcTransformerVoltageScore">-</div>
-                </div>
-                <div style="padding: 10px; background: white; border-radius: 6px;">
-                  <strong>🎯 DeepEnsemble:</strong>
-                  <div id="mcEnsembleVoltageScore">-</div>
-                </div>
-              </div>
-              <div id="mcVoltageWinner" style="margin-top: 10px; font-weight: bold; color: #059669;">-</div>
-            </div>
-
-            <div style="padding: 15px; background: #f3f4f6; border-radius: 8px;">
-              <h4 style="margin: 0 0 10px;">Temperature Prediction Accuracy</h4>
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                <div style="padding: 10px; background: white; border-radius: 6px;">
-                  <strong>🔮 Transformer:</strong>
-                  <div id="mcTransformerTempScore">-</div>
-                </div>
-                <div style="padding: 10px; background: white; border-radius: 6px;">
-                  <strong>🎯 DeepEnsemble:</strong>
-                  <div id="mcEnsembleTempScore">-</div>
-                </div>
-              </div>
-              <div id="mcTempWinner" style="margin-top: 10px; font-weight: bold; color: #059669;">-</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="meta">
-            <div>
-              <h2>Voltage Predictions</h2>
-              <p id="mcVoltageSummary" class="summary">Run comparison to see results...</p>
-            </div>
-            <button id="mcDownloadVoltage" class="ghost" disabled>Download PNG</button>
-          </div>
-          <div class="chart-wrap">
-            <canvas id="mcVoltageChart"></canvas>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="meta">
-            <div>
-              <h2>Temperature Predictions</h2>
-              <p id="mcTemperatureSummary" class="summary">Run comparison to see results...</p>
-            </div>
-            <button id="mcDownloadTemperature" class="ghost" disabled>Download PNG</button>
-          </div>
-          <div class="chart-wrap">
-            <canvas id="mcTemperatureChart"></canvas>
           </div>
         </section>
       </div>
